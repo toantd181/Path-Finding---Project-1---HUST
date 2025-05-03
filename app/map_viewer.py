@@ -1,11 +1,13 @@
 import sys
-from PyQt6.QtWidgets import QApplication, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsEllipseItem, QGraphicsLineItem
+from PyQt6.QtWidgets import QApplication, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsRectItem # Added QGraphicsRectItem
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QBrush, QColor
-from PyQt6.QtCore import Qt, QPointF, pyqtSignal # Added QColor, pyqtSignal
+from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal # Added QColor, QRectF, pyqtSignal
 
 class MapViewer(QGraphicsView):
     # Signal emitted when a traffic line is drawn, sending start and end points
     traffic_line_drawn = pyqtSignal(QPointF, QPointF)
+    # Signal emitted when a rain area rectangle is defined
+    rain_area_defined = pyqtSignal(QRectF)
 
     def __init__(self, image_path, on_point_selected):
         super().__init__()
@@ -14,11 +16,9 @@ class MapViewer(QGraphicsView):
         pixmap = QPixmap(image_path)
         if pixmap.isNull():
              print(f"Error: Could not load map image from {image_path}")
-             # Handle error appropriately, maybe show a default image or exit
         self.map_item = QGraphicsPixmapItem(pixmap)
         self.scene.addItem(self.map_item)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag) # Default drag mode set later
         self.scale_factor = 1.0
         self.on_point_selected = on_point_selected
 
@@ -33,39 +33,76 @@ class MapViewer(QGraphicsView):
         self._traffic_line_item = None # Temporary item while drawing
         self.traffic_jam_lines = [] # Store final traffic jam lines added
 
+        # --- Rain Area Drawing State ---
+        self._is_drawing_rain_area = False
+        self._rain_area_start = None
+        self._rain_area_rect_item = None # Temporary rectangle item
+        self.rain_area_visuals = [] # Store final rain area visuals
+
         # Set initial drag mode
-        self.set_traffic_drawing_mode(False) # Start with normal interaction
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag) # Start with normal interaction
 
     def set_traffic_drawing_mode(self, enabled: bool):
         """Activates or deactivates the traffic jam drawing mode."""
         self._is_drawing_traffic = enabled
         if self._is_drawing_traffic:
-            self.setDragMode(QGraphicsView.DragMode.NoDrag) # Disable panning while drawing
-            print("Traffic drawing mode ENABLED") # Debug
+            self.setDragMode(QGraphicsView.DragMode.NoDrag) # Disable panning
+            self._is_drawing_rain_area = False # Ensure rain drawing is off
+            print("Traffic drawing mode ENABLED")
         else:
-            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag) # Restore panning
-            # Clean up any unfinished drawing line if mode is toggled off mid-draw
+            # Only restore panning if rain mode is also off
+            if not self._is_drawing_rain_area:
+                self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            # Clean up unfinished traffic line
             if self._traffic_line_item:
                 self.scene.removeItem(self._traffic_line_item)
                 self._traffic_line_item = None
             self._traffic_line_start = None
-            print("Traffic drawing mode DISABLED") # Debug
+            print("Traffic drawing mode DISABLED")
+
+    def set_rain_drawing_mode(self, enabled: bool):
+        """Activates or deactivates the rain area drawing mode."""
+        self._is_drawing_rain_area = enabled
+        if self._is_drawing_rain_area:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag) # Disable panning
+            self._is_drawing_traffic = False # Ensure traffic drawing is off
+            print("Rain area drawing mode ENABLED")
+        else:
+            # Only restore panning if traffic mode is also off
+            if not self._is_drawing_traffic:
+                self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            # Clean up unfinished rain rectangle
+            if self._rain_area_rect_item:
+                self.scene.removeItem(self._rain_area_rect_item)
+                self._rain_area_rect_item = None
+            self._rain_area_start = None
+            print("Rain area drawing mode DISABLED")
+
 
     def mousePressEvent(self, event):
-        """Handles mouse press for point selection OR starting traffic line draw."""
+        """Handles mouse press for point selection OR starting traffic/rain draw."""
         pos = self.mapToScene(event.pos())
 
         if self._is_drawing_traffic:
             if event.button() == Qt.MouseButton.LeftButton:
                 self._traffic_line_start = pos
-                # Create a temporary line item
-                pen = QPen(QColor("orange"), 2, Qt.PenStyle.DashLine) # Style for drawing feedback
+                pen = QPen(QColor("orange"), 2, Qt.PenStyle.DashLine)
                 self._traffic_line_item = QGraphicsLineItem(QPointF.x(self._traffic_line_start), QPointF.y(self._traffic_line_start),
                                                             QPointF.x(self._traffic_line_start), QPointF.y(self._traffic_line_start))
                 self._traffic_line_item.setPen(pen)
                 self.scene.addItem(self._traffic_line_item)
-            # Prevent default behavior (like panning) when drawing
-            # super().mousePressEvent(event) # Don't call super if drawing
+            # Prevent default behavior
+        elif self._is_drawing_rain_area:
+             if event.button() == Qt.MouseButton.LeftButton:
+                 self._rain_area_start = pos
+                 # Create temporary rectangle item (initially zero size)
+                 pen = QPen(QColor(0, 150, 255, 150), 2, Qt.PenStyle.DashLine) # Semi-transparent blue dash
+                 brush = QBrush(QColor(0, 150, 255, 50)) # Very transparent blue fill
+                 self._rain_area_rect_item = QGraphicsRectItem(QRectF(self._rain_area_start, self._rain_area_start))
+                 self._rain_area_rect_item.setPen(pen)
+                 self._rain_area_rect_item.setBrush(brush)
+                 self.scene.addItem(self._rain_area_rect_item)
+             # Prevent default behavior
         else:
             # --- Original Point Selection Logic ---
             if event.button() == Qt.MouseButton.LeftButton:
@@ -83,43 +120,59 @@ class MapViewer(QGraphicsView):
 
 
     def mouseMoveEvent(self, event):
-        """Handles mouse move for drawing traffic line OR panning."""
+        """Handles mouse move for drawing traffic line, rain area OR panning."""
+        current_pos = self.mapToScene(event.pos())
+
         if self._is_drawing_traffic and self._traffic_line_start and self._traffic_line_item:
             # Update the end point of the temporary line
-            current_pos = self.mapToScene(event.pos())
             self._traffic_line_item.setLine(QPointF.x(self._traffic_line_start), QPointF.y(self._traffic_line_start),
                                             QPointF.x(current_pos), QPointF.y(current_pos))
-            # super().mouseMoveEvent(event) # Don't call super if drawing
+        elif self._is_drawing_rain_area and self._rain_area_start and self._rain_area_rect_item:
+             # Update the rectangle dimensions
+             rect = QRectF(self._rain_area_start, current_pos).normalized() # Ensure positive width/height
+             self._rain_area_rect_item.setRect(rect)
         else:
             # Allow default behavior (panning)
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        """Handles mouse release to finalize traffic line OR finish panning."""
-        if self._is_drawing_traffic and self._traffic_line_start and event.button() == Qt.MouseButton.LeftButton:
-            # Finalize the line
-            end_pos = self.mapToScene(event.pos())
+        """Handles mouse release to finalize traffic line, rain area OR finish panning."""
+        end_pos = self.mapToScene(event.pos())
 
-            # Remove the temporary dashed line
+        if self._is_drawing_traffic and self._traffic_line_start and event.button() == Qt.MouseButton.LeftButton:
+            # Finalize the traffic line
             if self._traffic_line_item:
                 self.scene.removeItem(self._traffic_line_item)
                 self._traffic_line_item = None
-
-            # Draw the final traffic jam line (optional persistent visual)
-            pen = QPen(QColor("orange"), 3) # Solid orange line for final
+            pen = QPen(QColor("orange"), 3)
             final_line = QGraphicsLineItem(QPointF.x(self._traffic_line_start), QPointF.y(self._traffic_line_start),
                                            QPointF.x(end_pos), QPointF.y(end_pos))
             final_line.setPen(pen)
             self.scene.addItem(final_line)
-            self.traffic_jam_lines.append(final_line) # Store it
-
-            # Emit the signal with the line coordinates
+            self.traffic_jam_lines.append(final_line)
             self.traffic_line_drawn.emit(self._traffic_line_start, end_pos)
-            print(f"Traffic line drawn from {self._traffic_line_start} to {end_pos}") # Debug
-
-            # Reset drawing state
+            print(f"Traffic line drawn from {self._traffic_line_start} to {end_pos}")
             self._traffic_line_start = None
-            # super().mouseReleaseEvent(event) # Don't call super if drawing
+        elif self._is_drawing_rain_area and self._rain_area_start and event.button() == Qt.MouseButton.LeftButton:
+             # Finalize the rain area rectangle
+             if self._rain_area_rect_item:
+                 final_rect = self._rain_area_rect_item.rect() # Get the final rect geometry
+                 # Make the temporary item permanent (or draw a new one)
+                 pen = QPen(QColor(0, 100, 200, 180), 2) # Slightly darker solid blue border
+                 brush = QBrush(QColor(0, 150, 255, 70)) # Slightly less transparent fill
+                 self._rain_area_rect_item.setPen(pen)
+                 self._rain_area_rect_item.setBrush(brush)
+                 # Keep the item, store it
+                 self.rain_area_visuals.append(self._rain_area_rect_item)
+                 self._rain_area_rect_item = None # Reset temporary item holder
+
+                 # Emit the signal with the rectangle coordinates
+                 self.rain_area_defined.emit(final_rect)
+                 print(f"Rain area defined: {final_rect}") # Debug
+             self._rain_area_start = None
+             # Optional: Deactivate drawing mode automatically after one area?
+             # self.set_rain_drawing_mode(False)
+             # self.parent().sidebar.rain_area_button.setChecked(False) # If you have access to parent
         else:
             # Allow default behavior
             super().mouseReleaseEvent(event)
@@ -148,6 +201,13 @@ class MapViewer(QGraphicsView):
             self.scene.removeItem(item)
         self.traffic_jam_lines.clear()
         print("Cleared traffic jam visuals") # Debug
+
+    def clear_rain_areas(self):
+        """Removes all drawn rain area visuals from the scene."""
+        for item in self.rain_area_visuals:
+            self.scene.removeItem(item)
+        self.rain_area_visuals.clear()
+        print("Cleared rain area visuals") # Debug
 
     def draw_path(self, path, node_positions):
         """Draws the calculated path on the map."""
@@ -188,27 +248,22 @@ class MapViewer(QGraphicsView):
 
     def wheelEvent(self, event):
         """Handles mouse wheel events for zooming."""
-        # Only zoom if not currently drawing a traffic line
-        if not (self._is_drawing_traffic and self._traffic_line_start):
+        # Disable zoom if any drawing mode is active
+        if not self._is_drawing_traffic and not self._is_drawing_rain_area:
             zoom_in_factor = 1.15
             zoom_out_factor = 1 / zoom_in_factor
-            # Save the scene pos
             old_pos = self.mapToScene(event.position().toPoint())
-            # Zoom
             if event.angleDelta().y() > 0:
                 zoom_factor = zoom_in_factor
             else:
                 zoom_factor = zoom_out_factor
             self.scale(zoom_factor, zoom_factor)
             self.scale_factor *= zoom_factor
-            # Get the new position
             new_pos = self.mapToScene(event.position().toPoint())
-            # Move scene to old position
             delta = new_pos - old_pos
             self.translate(delta.x(), delta.y())
         # else:
-            # Optionally provide feedback that zoom is disabled while drawing
-            # print("Zoom disabled while drawing traffic line.")
+            # print("Zoom disabled while drawing.")
 
 
 

@@ -1,18 +1,17 @@
 class TrafficTool:
     """Manages the state of the traffic jam tool."""
-    def __init__(self, default_weight=50):
-        self._selected_weight = default_weight
+    def __init__(self, default_weight=50): # Default weight, e.g., for "Light"
+        self._weight_increase = default_weight
+        # Add other necessary initializations
 
-    def set_weight(self, weight, checked):
-        """Sets the traffic weight if the corresponding radio button is checked."""
-        if checked:
-            self._selected_weight = weight
-            # print(f"Traffic weight set to: {self._selected_weight}") # Optional: for debugging
+    def set_weight(self, weight): # Remove the 'checked' parameter
+        """Sets the weight increase value for traffic jams."""
+        self._weight_increase = weight
+        print(f"TrafficTool weight set to: {self._weight_increase}") # Debugging
 
     def get_weight(self):
-        """Returns the currently selected traffic weight."""
-        return self._selected_weight
+        """Gets the current weight increase value."""
+        return self._weight_increase
 
-    # You can add methods here later to apply the traffic jam effect
-    # e.g., def apply_traffic(self, graph, line_segment):
-    #           pass
+    # Add methods for handling drawing, identifying affected edges, etc.
+    # ... other methods ...
