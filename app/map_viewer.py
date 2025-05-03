@@ -1,9 +1,12 @@
 import sys
-from PyQt6.QtWidgets import QApplication, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsEllipseItem, QGraphicsLineItem # Added QGraphicsEllipseItem, QGraphicsLineItem
-from PyQt6.QtGui import QPixmap, QPainter, QPen, QBrush
-from PyQt6.QtCore import Qt, QPointF # Added QPointF
+from PyQt6.QtWidgets import QApplication, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsEllipseItem, QGraphicsLineItem
+from PyQt6.QtGui import QPixmap, QPainter, QPen, QBrush, QColor
+from PyQt6.QtCore import Qt, QPointF, pyqtSignal # Added QColor, pyqtSignal
 
 class MapViewer(QGraphicsView):
+    # Signal emitted when a traffic line is drawn, sending start and end points
+    traffic_line_drawn = pyqtSignal(QPointF, QPointF)
+
     def __init__(self, image_path, on_point_selected):
         super().__init__()
         self.scene = QGraphicsScene(self)
@@ -15,35 +18,111 @@ class MapViewer(QGraphicsView):
         self.map_item = QGraphicsPixmapItem(pixmap)
         self.scene.addItem(self.map_item)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        # self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag) # Default drag mode set later
         self.scale_factor = 1.0
         self.on_point_selected = on_point_selected
-        # Store references to the graphics items for points and path
+
+        # --- Point and Path Items ---
         self.start_point_item = None
         self.end_point_item = None
         self.path_items = [] # Store path lines to clear them later
 
+        # --- Traffic Jam Drawing State ---
+        self._is_drawing_traffic = False
+        self._traffic_line_start = None
+        self._traffic_line_item = None # Temporary item while drawing
+        self.traffic_jam_lines = [] # Store final traffic jam lines added
+
+        # Set initial drag mode
+        self.set_traffic_drawing_mode(False) # Start with normal interaction
+
+    def set_traffic_drawing_mode(self, enabled: bool):
+        """Activates or deactivates the traffic jam drawing mode."""
+        self._is_drawing_traffic = enabled
+        if self._is_drawing_traffic:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag) # Disable panning while drawing
+            print("Traffic drawing mode ENABLED") # Debug
+        else:
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag) # Restore panning
+            # Clean up any unfinished drawing line if mode is toggled off mid-draw
+            if self._traffic_line_item:
+                self.scene.removeItem(self._traffic_line_item)
+                self._traffic_line_item = None
+            self._traffic_line_start = None
+            print("Traffic drawing mode DISABLED") # Debug
+
     def mousePressEvent(self, event):
-        """Handles user clicks to select start/end points."""
+        """Handles mouse press for point selection OR starting traffic line draw."""
         pos = self.mapToScene(event.pos())
 
-        if event.button() == Qt.MouseButton.LeftButton:
-            # Remove previous start point if it exists
-            if self.start_point_item:
-                self.scene.removeItem(self.start_point_item)
-                self.start_point_item = None
-            # Draw new start point and store the item
-            self.start_point_item = self.draw_point(pos, Qt.GlobalColor.green)
-            self.on_point_selected("start", pos.x(), pos.y())
+        if self._is_drawing_traffic:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._traffic_line_start = pos
+                # Create a temporary line item
+                pen = QPen(QColor("orange"), 2, Qt.PenStyle.DashLine) # Style for drawing feedback
+                self._traffic_line_item = QGraphicsLineItem(QPointF.x(self._traffic_line_start), QPointF.y(self._traffic_line_start),
+                                                            QPointF.x(self._traffic_line_start), QPointF.y(self._traffic_line_start))
+                self._traffic_line_item.setPen(pen)
+                self.scene.addItem(self._traffic_line_item)
+            # Prevent default behavior (like panning) when drawing
+            # super().mousePressEvent(event) # Don't call super if drawing
+        else:
+            # --- Original Point Selection Logic ---
+            if event.button() == Qt.MouseButton.LeftButton:
+                if self.start_point_item:
+                    self.scene.removeItem(self.start_point_item)
+                self.start_point_item = self.draw_point(pos, Qt.GlobalColor.green)
+                self.on_point_selected("start", pos.x(), pos.y())
+            elif event.button() == Qt.MouseButton.RightButton:
+                if self.end_point_item:
+                    self.scene.removeItem(self.end_point_item)
+                self.end_point_item = self.draw_point(pos, Qt.GlobalColor.red)
+                self.on_point_selected("end", pos.x(), pos.y())
+            # Allow default behavior (like starting a pan) if not drawing
+            super().mousePressEvent(event)
 
-        elif event.button() == Qt.MouseButton.RightButton:
-            # Remove previous end point if it exists
-            if self.end_point_item:
-                self.scene.removeItem(self.end_point_item)
-                self.end_point_item = None
-            # Draw new end point and store the item
-            self.end_point_item = self.draw_point(pos, Qt.GlobalColor.red)
-            self.on_point_selected("end", pos.x(), pos.y())
+
+    def mouseMoveEvent(self, event):
+        """Handles mouse move for drawing traffic line OR panning."""
+        if self._is_drawing_traffic and self._traffic_line_start and self._traffic_line_item:
+            # Update the end point of the temporary line
+            current_pos = self.mapToScene(event.pos())
+            self._traffic_line_item.setLine(QPointF.x(self._traffic_line_start), QPointF.y(self._traffic_line_start),
+                                            QPointF.x(current_pos), QPointF.y(current_pos))
+            # super().mouseMoveEvent(event) # Don't call super if drawing
+        else:
+            # Allow default behavior (panning)
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Handles mouse release to finalize traffic line OR finish panning."""
+        if self._is_drawing_traffic and self._traffic_line_start and event.button() == Qt.MouseButton.LeftButton:
+            # Finalize the line
+            end_pos = self.mapToScene(event.pos())
+
+            # Remove the temporary dashed line
+            if self._traffic_line_item:
+                self.scene.removeItem(self._traffic_line_item)
+                self._traffic_line_item = None
+
+            # Draw the final traffic jam line (optional persistent visual)
+            pen = QPen(QColor("orange"), 3) # Solid orange line for final
+            final_line = QGraphicsLineItem(QPointF.x(self._traffic_line_start), QPointF.y(self._traffic_line_start),
+                                           QPointF.x(end_pos), QPointF.y(end_pos))
+            final_line.setPen(pen)
+            self.scene.addItem(final_line)
+            self.traffic_jam_lines.append(final_line) # Store it
+
+            # Emit the signal with the line coordinates
+            self.traffic_line_drawn.emit(self._traffic_line_start, end_pos)
+            print(f"Traffic line drawn from {self._traffic_line_start} to {end_pos}") # Debug
+
+            # Reset drawing state
+            self._traffic_line_start = None
+            # super().mouseReleaseEvent(event) # Don't call super if drawing
+        else:
+            # Allow default behavior
+            super().mouseReleaseEvent(event)
 
     def draw_point(self, pos: QPointF, color):
         """Draws a point on the map and returns the QGraphicsEllipseItem."""
@@ -62,6 +141,13 @@ class MapViewer(QGraphicsView):
         for item in self.path_items:
             self.scene.removeItem(item)
         self.path_items.clear() # Clear the list
+
+    def clear_traffic_jams(self):
+        """Removes all drawn traffic jam lines from the scene."""
+        for item in self.traffic_jam_lines:
+            self.scene.removeItem(item)
+        self.traffic_jam_lines.clear()
+        print("Cleared traffic jam visuals") # Debug
 
     def draw_path(self, path, node_positions):
         """Draws the calculated path on the map."""
@@ -102,22 +188,27 @@ class MapViewer(QGraphicsView):
 
     def wheelEvent(self, event):
         """Handles mouse wheel events for zooming."""
-        zoom_in_factor = 1.15
-        zoom_out_factor = 1 / zoom_in_factor
-        # Save the scene pos
-        old_pos = self.mapToScene(event.position().toPoint())
-        # Zoom
-        if event.angleDelta().y() > 0:
-            zoom_factor = zoom_in_factor
-        else:
-            zoom_factor = zoom_out_factor
-        self.scale(zoom_factor, zoom_factor)
-        self.scale_factor *= zoom_factor
-        # Get the new position
-        new_pos = self.mapToScene(event.position().toPoint())
-        # Move scene to old position
-        delta = new_pos - old_pos
-        self.translate(delta.x(), delta.y())
+        # Only zoom if not currently drawing a traffic line
+        if not (self._is_drawing_traffic and self._traffic_line_start):
+            zoom_in_factor = 1.15
+            zoom_out_factor = 1 / zoom_in_factor
+            # Save the scene pos
+            old_pos = self.mapToScene(event.position().toPoint())
+            # Zoom
+            if event.angleDelta().y() > 0:
+                zoom_factor = zoom_in_factor
+            else:
+                zoom_factor = zoom_out_factor
+            self.scale(zoom_factor, zoom_factor)
+            self.scale_factor *= zoom_factor
+            # Get the new position
+            new_pos = self.mapToScene(event.position().toPoint())
+            # Move scene to old position
+            delta = new_pos - old_pos
+            self.translate(delta.x(), delta.y())
+        # else:
+            # Optionally provide feedback that zoom is disabled while drawing
+            # print("Zoom disabled while drawing traffic line.")
 
 
 
