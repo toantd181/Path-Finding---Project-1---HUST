@@ -2,7 +2,8 @@ import sys # Import sys
 import os  # Import os
 import numpy as np # Import numpy
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QHBoxLayout, QWidget,
-                             QMessageBox, QGraphicsScene, QGraphicsRectItem)
+                             QMessageBox, QGraphicsScene, QGraphicsRectItem,
+                             QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsSimpleTextItem) # Add graphics items used
 from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer # Added QTimer
 from PyQt6.QtGui import QColor, QBrush, QPen, QKeyEvent
 from .map_viewer import MapViewer, EFFECT_DATA_KEY
@@ -102,10 +103,9 @@ class MainWindow(QMainWindow):
             print(f"Stored original weights for {len(self._original_weights)} edges.")
 
         # --- Traffic Light Management ---
-        # Store active TrafficLightInstance objects, keyed by something unique?
-        # Let's use the icon item's memory address as a key for simplicity,
-        # assuming icon items are unique per traffic light.
-        self._active_traffic_lights = {} # {icon_item_id: TrafficLightInstance}
+        # Store active TrafficLightInstance objects, keyed by icon item's memory address
+        # Value is now a tuple: (instance, text_item)
+        self._active_traffic_lights = {} # {icon_item_id: (TrafficLightInstance, QGraphicsSimpleTextItem)}
 
         # --- Connect Signals ---
         # Tools activation
@@ -119,8 +119,8 @@ class MainWindow(QMainWindow):
         self.map_viewer.rain_area_defined.connect(self.handle_rain_area)
         self.map_viewer.block_way_drawn.connect(self.handle_block_way)
         # Connect new traffic light signals
-        # self.map_viewer.traffic_light_icon_placed.connect(self.handle_traffic_light_placement) # Not needed if line_drawn has all info
-        self.map_viewer.traffic_light_line_drawn.connect(self.handle_traffic_light_finalized)
+        # self.map_viewer.traffic_light_line_drawn.connect(self.handle_traffic_light_finalized) # Old signal
+        self.map_viewer.traffic_light_visuals_created.connect(self.handle_traffic_light_finalized) # New signal - This connection is now correct
 
         # Effect removal / changes
         self.map_viewer.effects_changed.connect(self._handle_effects_changed) # Connect effect removal
@@ -131,20 +131,26 @@ class MainWindow(QMainWindow):
         print("Effect removed, checking for stopped timers and recalculating...")
 
         # Check if any removed items were associated with active traffic lights
+        # Get current icon IDs from the stored visuals in MapViewer
+        # The tuple now contains (icon, line, text, data)
         active_icon_ids = {id(visual[0]) for visual in self.map_viewer.traffic_light_visuals}
         lights_to_remove = []
-        for icon_id, instance in self._active_traffic_lights.items():
+
+        # Iterate over a copy of the keys since we might modify the dictionary
+        for icon_id in list(self._active_traffic_lights.keys()):
             if icon_id not in active_icon_ids:
+                instance, text_item = self._active_traffic_lights[icon_id]
                 print(f"Stopping timer for removed traffic light (icon id: {icon_id})")
                 instance.stop()
+                # No need to manually remove text_item, MapViewer handles visual removal
                 lights_to_remove.append(icon_id)
 
         for icon_id in lights_to_remove:
-            del self._active_traffic_lights[icon_id]
+            if icon_id in self._active_traffic_lights: # Check if still exists before deleting
+                 del self._active_traffic_lights[icon_id]
 
         # Recalculate everything after removal
         self._recalculate_effects_and_path()
-
 
     def handle_traffic_line(self, start_point, end_point):
         """Handles the line drawn in traffic mode: Stores data on the visual item."""
@@ -219,47 +225,57 @@ class MainWindow(QMainWindow):
         # --- Recalculate all effects and path ---
         self._recalculate_effects_and_path()
 
-    # --- Traffic Light Handling --- New Methods ---
-    def handle_traffic_light_finalized(self, icon_pos: QPointF, line_start: QPointF, line_end: QPointF):
-        """Handles the finalized placement of a traffic light (icon + line)."""
+    # --- Traffic Light Handling --- Modified Method ---
+    def handle_traffic_light_finalized(self, icon_pos: QPointF, line_start: QPointF, line_end: QPointF,
+                                       icon_item: QGraphicsPixmapItem, line_item: QGraphicsLineItem, text_item: QGraphicsSimpleTextItem):
+        """Handles the finalized placement of a traffic light (icon + line + text)."""
         if not self.pathfinder: return
 
         # Get durations from the sidebar UI
         durations = self.sidebar.get_current_traffic_light_durations()
         print(f"Traffic light finalized at {icon_pos} with durations: {durations}")
 
-        # Find the corresponding visual items (last added tuple)
-        if self.map_viewer.traffic_light_visuals:
-            icon_item, line_item, _ = self.map_viewer.traffic_light_visuals[-1]
+        # Visual items are now passed directly from the signal
 
-            # Create the state manager instance for this light
-            traffic_light_instance = TrafficLightInstance(durations)
-            traffic_light_instance.state_changed.connect(self._traffic_light_state_updated) # Connect signal
+        # Create the state manager instance for this light
+        traffic_light_instance = TrafficLightInstance(durations)
+        traffic_light_instance.state_changed.connect(self._traffic_light_state_updated) # Connect state change
+        # Connect the new countdown signal
+        traffic_light_instance.remaining_time_updated.connect(self._update_traffic_light_countdown_display)
 
-            # Store data on the visual items for reference and recalculation
-            traffic_light_data = {
-                "type": "traffic_light",
-                "icon_pos": icon_pos,
-                "line_start": line_start,
-                "line_end": line_end,
-                "durations": durations,
-                "instance": traffic_light_instance # Store the instance itself
-            }
-            icon_item.setData(EFFECT_DATA_KEY, traffic_light_data)
-            line_item.setData(EFFECT_DATA_KEY, traffic_light_data)
+        # Store data on the visual items for reference and recalculation
+        # Note: MapViewer already stored basic data, we add the instance here
+        # Retrieve existing data and update it
+        existing_data = icon_item.data(EFFECT_DATA_KEY) or {} # Get data MapViewer stored
+        traffic_light_data = {
+            **existing_data, # Keep existing keys like type, positions
+            "durations": durations,
+            "instance": traffic_light_instance, # Store the instance itself
+            "text_item": text_item # Keep reference to text item
+        }
+        # Update data stored on items
+        icon_item.setData(EFFECT_DATA_KEY, traffic_light_data)
+        line_item.setData(EFFECT_DATA_KEY, traffic_light_data)
+        text_item.setData(EFFECT_DATA_KEY, traffic_light_data)
 
-            # Store the active instance, keyed by icon item's ID
-            icon_id = id(icon_item)
-            self._active_traffic_lights[icon_id] = traffic_light_instance
-            print(f"Stored data and started timer for traffic light (icon id: {icon_id})")
+        # Update the data stored in MapViewer's list as well
+        for i, (ic, ln, tx, data) in enumerate(self.map_viewer.traffic_light_visuals):
+             if ic == icon_item:
+                 self.map_viewer.traffic_light_visuals[i] = (ic, ln, tx, traffic_light_data)
+                 break
 
-            # Update the visual state immediately (e.g., tooltip)
-            self.map_viewer.update_traffic_light_visual_state(icon_item, traffic_light_instance.current_state)
+        # Store the active instance and text_item, keyed by icon item's ID
+        icon_id = id(icon_item)
+        self._active_traffic_lights[icon_id] = (traffic_light_instance, text_item)
+        print(f"Stored data and started timer for traffic light (icon id: {icon_id})")
 
-            # --- Recalculate all effects and path ---
-            self._recalculate_effects_and_path()
-        else:
-            print("Warning: Could not find traffic light visual items to store data on.")
+        # Update the visual state immediately (e.g., tooltip, initial countdown, text color)
+        self.map_viewer.update_traffic_light_visual_state(icon_item, text_item, traffic_light_instance.current_state) # Pass text_item
+        self.map_viewer.update_traffic_light_countdown(text_item, traffic_light_instance.get_remaining_time())
+
+        # --- Recalculate all effects and path ---
+        self._recalculate_effects_and_path()
+
 
     def _traffic_light_state_updated(self):
         """Slot called when a TrafficLightInstance changes state."""
@@ -268,25 +284,50 @@ class MainWindow(QMainWindow):
 
         print(f"Traffic light state changed to: {sender_instance.current_state}. Recalculating...")
 
-        # Find the corresponding visual icon to update its appearance
+        # Find the corresponding visual icon and text item to update appearance/tooltip
         found_icon_item = None
-        for icon_item, _, data_dict in self.map_viewer.traffic_light_visuals:
-             stored_data = icon_item.data(EFFECT_DATA_KEY)
-             if stored_data and stored_data.get("instance") == sender_instance:
-                 found_icon_item = icon_item
-                 # Update the stored data if needed (though instance holds the state)
-                 # stored_data["current_state"] = sender_instance.current_state # Example if needed elsewhere
-                 # icon_item.setData(EFFECT_DATA_KEY, stored_data)
+        found_text_item = None
+        for icon_id, (instance, text_item) in self._active_traffic_lights.items():
+             if instance == sender_instance:
+                 # Need to find the icon_item corresponding to this icon_id
+                 # Iterate through MapViewer's visuals (tuple structure: icon, line, text, data)
+                 for ic, _, tx, _ in self.map_viewer.traffic_light_visuals:
+                     if id(ic) == icon_id:
+                         found_icon_item = ic
+                         # Use the text_item directly associated with the instance in our dict
+                         found_text_item = text_item
+                         break
                  break
 
-        if found_icon_item:
-             self.map_viewer.update_traffic_light_visual_state(found_icon_item, sender_instance.current_state)
+        if found_icon_item and found_text_item:
+             # Update tooltip AND text color
+             self.map_viewer.update_traffic_light_visual_state(found_icon_item, found_text_item, sender_instance.current_state) # Pass text_item
+             # Update countdown immediately on state change as well
+             self.map_viewer.update_traffic_light_countdown(found_text_item, sender_instance.get_remaining_time())
         else:
              print("Warning: Could not find visual item for updated traffic light instance.")
 
 
         # Recalculate paths since weights have changed
         self._recalculate_effects_and_path()
+
+    def _update_traffic_light_countdown_display(self, remaining_seconds: int):
+        """Slot called when a TrafficLightInstance emits remaining time."""
+        sender_instance = self.sender()
+        if not isinstance(sender_instance, TrafficLightInstance): return
+
+        # Find the text item associated with this instance
+        found_text_item = None
+        for instance, text_item in self._active_traffic_lights.values():
+            if instance == sender_instance:
+                found_text_item = text_item
+                break
+
+        if found_text_item:
+            self.map_viewer.update_traffic_light_countdown(found_text_item, remaining_seconds)
+        # else: # This might print too often if an instance is somehow detached
+        #     print("Warning: Could not find text item for countdown update.")
+
 
     # --- Recalculation Logic ---
     def _recalculate_effects_and_path(self):
@@ -392,10 +433,22 @@ class MainWindow(QMainWindow):
 
         # 5. Reapply traffic light effects based on current state
         print(f"Reapplying effects from {len(self.map_viewer.traffic_light_visuals)} traffic lights.")
-        for icon_item, line_item, _ in self.map_viewer.traffic_light_visuals:
-            item_data = icon_item.data(EFFECT_DATA_KEY) # Get data (should be same on icon/line)
+        # Iterate using the MapViewer's list as the source of truth for visuals
+        # Tuple structure: (icon_item, line_item, text_item, data_dict)
+        for icon_item, line_item, text_item, item_data in self.map_viewer.traffic_light_visuals:
+            # Find the corresponding instance from our active dictionary using icon_id
+            icon_id = id(icon_item)
+            instance_tuple = self._active_traffic_lights.get(icon_id)
+
+            if not instance_tuple:
+                print(f"  Warning: No active instance found for traffic light icon id {icon_id}. Skipping.")
+                continue
+
+            instance, _ = instance_tuple # We only need the instance here
+            # item_data is already retrieved from the loop
+
             if item_data and item_data.get("type") == "traffic_light":
-                instance = item_data.get("instance")
+                # instance = item_data.get("instance") # Already got instance from dict
                 effect_start = item_data.get("line_start")
                 effect_end = item_data.get("line_end")
 
@@ -423,7 +476,9 @@ class MainWindow(QMainWindow):
                              print(f"  Error processing edge ({u}, {v}) for traffic light reapplication: {e}")
                     if affected_count > 0: print(f"  Applied traffic light ({current_state_name}) weight mod +{weight_modifier:.1f} to {affected_count} intersecting edges.")
                 else:
-                    print("  Warning: Missing data or instance on traffic light item.")
+                    print(f"  Warning: Missing data or instance on traffic light item (icon id: {icon_id}).")
+            else:
+                 print(f"  Warning: Item data missing or not type 'traffic_light' for icon id: {icon_id}.")
 
 
         # 6. Recalculate and draw path if possible
@@ -451,7 +506,8 @@ class MainWindow(QMainWindow):
     def stop_all_traffic_light_timers(self):
         """Stops all active traffic light timers."""
         print("Stopping all traffic light timers...")
-        for instance in self._active_traffic_lights.values():
+        # Iterate through a copy of values because stopping might trigger signals? (unlikely but safer)
+        for instance, text_item in list(self._active_traffic_lights.values()):
             instance.stop()
         self._active_traffic_lights.clear() # Clear the active instances dictionary
         print("All traffic light timers stopped and instances cleared.")

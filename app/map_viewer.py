@@ -4,6 +4,7 @@ from PyQt6.QtWidgets import (QApplication, QGraphicsView, QGraphicsScene,
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QBrush, QColor, QIcon, QFont # Added QIcon, QFont
 from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal, QLineF
 import os # Import os
+from .tools.traffic_light_tool import TrafficLightState # Import the state class
 
 # Define keys for storing data on graphics items
 EFFECT_DATA_KEY = Qt.ItemDataRole.UserRole + 1 # Use UserRole + n for custom data
@@ -15,6 +16,12 @@ TRAFFIC_LIGHT_ICON = QIcon(TRAFFIC_LIGHT_ICON_PATH)
 TRAFFIC_LIGHT_PIXMAP = TRAFFIC_LIGHT_ICON.pixmap(32, 32) # Adjust size as needed
 if TRAFFIC_LIGHT_PIXMAP.isNull():
     print(f"Warning: Could not load traffic light icon: {TRAFFIC_LIGHT_ICON_PATH}")
+# ---
+
+# --- Countdown Text Font ---
+COUNTDOWN_FONT = QFont("Arial", 10, QFont.Weight.Bold)
+COUNTDOWN_COLOR = QColor("white")
+COUNTDOWN_BG_COLOR = QColor(0, 0, 0, 150) # Semi-transparent black background
 # ---
 
 class MapViewer(QGraphicsView):
@@ -30,8 +37,9 @@ class MapViewer(QGraphicsView):
     # --- New Signals for Traffic Light ---
     # Emitted after user clicks to place the icon
     traffic_light_icon_placed = pyqtSignal(QPointF)
-    # Emitted after user finishes drawing the effect line for a traffic light
-    traffic_light_line_drawn = pyqtSignal(QPointF, QPointF, QPointF) # icon_pos, line_start, line_end
+    # Emitted after user finishes drawing the effect line and all visuals are created
+    # Sends: icon_pos, line_start, line_end, icon_item, line_item, text_item
+    traffic_light_visuals_created = pyqtSignal(QPointF, QPointF, QPointF, QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsSimpleTextItem) # Correct signal definition
 
     def __init__(self, image_path, on_point_selected, scene=None):
         super().__init__()
@@ -58,7 +66,7 @@ class MapViewer(QGraphicsView):
         self.traffic_jam_lines = []
         self.rain_area_visuals = []
         self.block_way_visuals = []
-        # Store tuples: (icon_item, line_item, data_dict)
+        # Store tuples: (icon_item, line_item, text_item, data_dict)
         # data_dict will hold durations, state, timer etc. managed by MainWindow
         self.traffic_light_visuals = [] # New list for traffic lights
 
@@ -195,16 +203,20 @@ class MapViewer(QGraphicsView):
                     self.scene.removeItem(item)
                     self.block_way_visuals.remove(item)
                     removed = True
-                # Check and remove from traffic lights (remove both icon and line)
+                # Check and remove from traffic lights (remove icon, line, and text)
                 else:
-                    for i, (icon_item, line_item, _) in enumerate(self.traffic_light_visuals):
-                        if item == icon_item or item == line_item:
+                    for i, (icon_item, line_item, text_item, _) in enumerate(self.traffic_light_visuals):
+                        # Check if clicked item is any part of the traffic light visual group
+                        if item == icon_item or item == line_item or item == text_item:
                             self.scene.removeItem(icon_item)
                             self.scene.removeItem(line_item)
+                            self.scene.removeItem(text_item) # Remove text item as well
                             # MainWindow needs to know which specific light was removed
                             # We can pass the item's data back or handle timer stop in MainWindow based on item removal
-                            removed_data = self.traffic_light_visuals.pop(i)[2] # Get data before removing
-                            item.setData(EFFECT_DATA_KEY, removed_data) # Temporarily store data on item being removed
+                            removed_data = self.traffic_light_visuals.pop(i)[3] # Get data before removing (index 3 now)
+                            # Store data on the item being clicked for MainWindow to identify
+                            if isinstance(item, (QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsSimpleTextItem)):
+                                item.setData(EFFECT_DATA_KEY, removed_data)
                             removed = True
                             break # Found and removed
 
@@ -338,19 +350,28 @@ class MapViewer(QGraphicsView):
                 self.scene.removeItem(self._current_traffic_light_icon_item)
                 self._current_traffic_light_icon_item = None
 
-            # Create permanent visuals (icon and line)
+            # Create permanent visuals (icon, line, and text)
             perm_icon_item = self.draw_traffic_light_icon(final_icon_pos)
             perm_line_item = self.draw_traffic_light_effect_line(final_line_start, final_line_end)
+            # Create the countdown text item (initially empty or showing default)
+            perm_text_item = self.create_traffic_light_countdown_text(final_icon_pos)
 
-            # Store visuals (MainWindow will add data later via signal handler)
-            # Store placeholder data for now
-            traffic_light_data = {"type": "traffic_light", "icon_pos": final_icon_pos, "line_start": final_line_start, "line_end": final_line_end}
+            # Store visuals (MainWindow will add instance data later via signal handler)
+            traffic_light_data = {
+                "type": "traffic_light",
+                "icon_pos": final_icon_pos,
+                "line_start": final_line_start,
+                "line_end": final_line_end
+                # Instance and durations added by MainWindow
+            }
             perm_icon_item.setData(EFFECT_DATA_KEY, traffic_light_data) # Link data
             perm_line_item.setData(EFFECT_DATA_KEY, traffic_light_data) # Link data
-            self.traffic_light_visuals.append((perm_icon_item, perm_line_item, traffic_light_data))
+            perm_text_item.setData(EFFECT_DATA_KEY, traffic_light_data) # Link data too
+            # Store tuple including the text item
+            self.traffic_light_visuals.append((perm_icon_item, perm_line_item, perm_text_item, traffic_light_data))
 
-            # Emit signal with all info
-            self.traffic_light_line_drawn.emit(final_icon_pos, final_line_start, final_line_end)
+            # Emit signal with all info, including the new text item
+            self.traffic_light_visuals_created.emit(final_icon_pos, final_line_start, final_line_end, perm_icon_item, perm_line_item, perm_text_item)
 
             # Reset state and cursor
             self._is_drawing_traffic_light_line = False
@@ -358,8 +379,7 @@ class MapViewer(QGraphicsView):
             self._traffic_light_line_start = None
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
             self.setCursor(Qt.CursorShape.ArrowCursor)
-            # Uncheck the button in the sidebar
-            # self.parent().sidebar.traffic_light_button.setChecked(False) # Requires access to parent/sidebar
+            # Uncheck the button in the sidebar - MainWindow should handle this via signal/slot
             event.accept()
 
         elif self._is_drawing_traffic and self._traffic_line_item:
@@ -512,14 +532,44 @@ class MapViewer(QGraphicsView):
         self.scene.addItem(line)
         return line
 
-    def update_traffic_light_visual_state(self, icon_item, state_color_name):
-        """Updates the visual appearance (e.g., tooltip) of a traffic light icon."""
-        # For now, just update the tooltip. Could potentially change icon color overlay later.
-        color_map = {"red": "Red", "yellow": "Yellow", "green": "Green"}
-        state_text = color_map.get(state_color_name, "Unknown")
+    def create_traffic_light_countdown_text(self, icon_pos: QPointF):
+        """Creates and adds the text item for the countdown timer."""
+        text_item = QGraphicsSimpleTextItem("") # Start empty
+        text_item.setFont(COUNTDOWN_FONT)
+        text_item.setBrush(QBrush(COUNTDOWN_COLOR))
+        # Position it slightly below or beside the icon
+        # Adjust offset as needed based on icon size
+        text_offset = QPointF(0, TRAFFIC_LIGHT_PIXMAP.height() / 2 + 2)
+        text_item.setPos(icon_pos + text_offset)
+        text_item.setZValue(3) # Ensure text is on top
+        # Optional: Add background for better visibility
+        # text_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations) # Keep text size constant? Maybe not desired.
+        # A background rect could be added separately and grouped if needed.
+        self.scene.addItem(text_item)
+        return text_item
+
+    def update_traffic_light_countdown(self, text_item: QGraphicsSimpleTextItem, remaining_seconds: int):
+        """Updates the text of the countdown display item."""
+        if text_item and text_item.scene() == self.scene: # Check if item still exists
+             text_item.setText(str(remaining_seconds))
+             # Color is now handled by update_traffic_light_visual_state
+
+    def update_traffic_light_visual_state(self, icon_item: QGraphicsPixmapItem, text_item: QGraphicsSimpleTextItem, state_name: str):
+        """Updates the visual appearance (tooltip and text color) of a traffic light."""
+        # Update tooltip
+        color_map_text = {"red": "Red", "yellow": "Yellow", "green": "Green"}
+        state_text = color_map_text.get(state_name, "Unknown")
         icon_item.setToolTip(f"Traffic Light ({state_text})")
-        # Example: Add a small status indicator (optional)
-        # Could add/remove a small colored circle next to the icon
+
+        # Update text color
+        if text_item and text_item.scene() == self.scene:
+            color_map_brush = {
+                TrafficLightState.RED: QColor("red"),
+                TrafficLightState.YELLOW: QColor("yellow"),
+                TrafficLightState.GREEN: QColor("lime") # Use lime for better visibility than dark green
+            }
+            text_color = color_map_brush.get(state_name, COUNTDOWN_COLOR) # Default to white if state unknown
+            text_item.setBrush(QBrush(text_color))
 
 
     # --- Clearing Methods ---
@@ -544,12 +594,14 @@ class MapViewer(QGraphicsView):
         self.block_way_visuals.clear()
 
     def clear_traffic_lights(self):
-        """Clears all traffic light visuals."""
-        for icon_item, line_item, _ in self.traffic_light_visuals:
+        """Clears all traffic light visuals (icon, line, text)."""
+        for icon_item, line_item, text_item, _ in self.traffic_light_visuals:
             if icon_item and icon_item.scene() == self.scene: # Check if still in scene
                  self.scene.removeItem(icon_item)
             if line_item and line_item.scene() == self.scene:
                  self.scene.removeItem(line_item)
+            if text_item and text_item.scene() == self.scene: # Remove text item
+                 self.scene.removeItem(text_item)
         self.traffic_light_visuals.clear()
         # Note: Timers associated with these need to be stopped in MainWindow
 
