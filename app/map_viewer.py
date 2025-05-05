@@ -1,384 +1,620 @@
-import sys
-from PyQt6.QtWidgets import QApplication, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsRectItem
-from PyQt6.QtGui import QPixmap, QPainter, QPen, QBrush, QColor
-from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal
+from PyQt6.QtWidgets import (QApplication, QGraphicsView, QGraphicsScene,
+                             QGraphicsPixmapItem, QGraphicsEllipseItem, QGraphicsLineItem,
+                             QGraphicsRectItem, QGraphicsSimpleTextItem) # Added QGraphicsSimpleTextItem
+from PyQt6.QtGui import QPixmap, QPainter, QPen, QBrush, QColor, QIcon, QFont # Added QIcon, QFont
+from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal, QLineF
+import os # Import os
 
 # Define keys for storing data on graphics items
 EFFECT_DATA_KEY = Qt.ItemDataRole.UserRole + 1 # Use UserRole + n for custom data
+
+# --- Traffic Light Icon ---
+# Load the icon once
+TRAFFIC_LIGHT_ICON_PATH = os.path.join(os.path.dirname(__file__), 'assets', 'icons', 'traffic-light.png')
+TRAFFIC_LIGHT_ICON = QIcon(TRAFFIC_LIGHT_ICON_PATH)
+TRAFFIC_LIGHT_PIXMAP = TRAFFIC_LIGHT_ICON.pixmap(32, 32) # Adjust size as needed
+if TRAFFIC_LIGHT_PIXMAP.isNull():
+    print(f"Warning: Could not load traffic light icon: {TRAFFIC_LIGHT_ICON_PATH}")
+# ---
 
 class MapViewer(QGraphicsView):
     # Signal emitted when a traffic line is drawn, sending start and end points
     traffic_line_drawn = pyqtSignal(QPointF, QPointF)
     # Signal emitted when a rain area rectangle is defined
     rain_area_defined = pyqtSignal(QRectF)
+    # Signal emitted when a block way line is drawn
+    block_way_drawn = pyqtSignal(QPointF, QPointF) # New signal
     # Signal emitted when any effect visual is removed via Shift+Click
     effects_changed = pyqtSignal()
 
-    def __init__(self, image_path, on_point_selected, scene=None): # Accept scene optionally
+    # --- New Signals for Traffic Light ---
+    # Emitted after user clicks to place the icon
+    traffic_light_icon_placed = pyqtSignal(QPointF)
+    # Emitted after user finishes drawing the effect line for a traffic light
+    traffic_light_line_drawn = pyqtSignal(QPointF, QPointF, QPointF) # icon_pos, line_start, line_end
+
+    def __init__(self, image_path, on_point_selected, scene=None):
         super().__init__()
-        # Use provided scene or create a new one
         self.scene = scene if scene else QGraphicsScene(self)
         self.setScene(self.scene)
 
         pixmap = QPixmap(image_path)
         if pixmap.isNull():
-             print(f"Error: Could not load map image from {image_path}")
-             # Handle error appropriately, maybe raise exception or show message
+            print(f"Error: Could not load map image from {image_path}")
         else:
-            self.map_item = QGraphicsPixmapItem(pixmap)
-            # Add map item only if pixmap loaded successfully
-            self.scene.addItem(self.map_item)
+            self.scene.addPixmap(pixmap)
 
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.scale_factor = 1.0
-        self.on_point_selected = on_point_selected # Callback for start/end node selection
+        self.on_point_selected = on_point_selected
 
         # --- Point and Path Items ---
-        # These are now managed more directly by MainWindow interacting with MapViewer methods
-        # self.start_point_item = None # Use set_permanent_point instead
-        # self.end_point_item = None
-        self._permanent_start_item = None # Store the final start marker
-        self._permanent_end_item = None   # Store the final end marker
-        self._temporary_point_item = None # For click feedback before node snapping
-        self.path_items = [] # Store path lines to clear them later
+        self._permanent_start_item = None
+        self._permanent_end_item = None
+        self._temporary_point_item = None
+        self.path_items = []
 
-        # --- Traffic Jam Drawing State ---
+        # --- Effect Visuals Storage ---
+        self.traffic_jam_lines = []
+        self.rain_area_visuals = []
+        self.block_way_visuals = []
+        # Store tuples: (icon_item, line_item, data_dict)
+        # data_dict will hold durations, state, timer etc. managed by MainWindow
+        self.traffic_light_visuals = [] # New list for traffic lights
+
+        # --- Drawing States ---
         self._is_drawing_traffic = False
         self._traffic_line_start = None
-        self._traffic_line_item = None # Temporary item while drawing
-        self.traffic_jam_lines = [] # Store final traffic jam line QGraphicsLineItems
+        self._traffic_line_item = None
 
-        # --- Rain Area Drawing State ---
         self._is_drawing_rain_area = False
         self._rain_area_start = None
-        self._rain_area_rect_item = None # Temporary rectangle item
-        self.rain_area_visuals = [] # Store final rain area QGraphicsRectItems
+        self._rain_area_rect_item = None
 
-        # Set initial drag mode
-        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag) # Start with normal interaction
+        self._is_drawing_block_way = False
+        self._block_way_start = None
+        self._block_way_line_item = None
 
-    # --- Drawing Mode Setters (set_traffic_drawing_mode, set_rain_drawing_mode) remain the same ---
+        # --- Traffic Light Drawing State --- New ---
+        self._is_placing_traffic_light_icon = False # True when tool active, waiting for click
+        self._is_drawing_traffic_light_line = False # True after icon placed, drawing line
+        self._traffic_light_icon_pos = None      # Position where the icon was placed
+        self._traffic_light_line_start = None    # Start of the effect line (usually same as icon pos)
+        self._traffic_light_line_item = None     # Temporary line item while drawing effect line
+        self._current_traffic_light_icon_item = None # Temporary icon item shown before line draw
+        # --- End Traffic Light State ---
+
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+
+    # --- Drawing Mode Setters ---
     def set_traffic_drawing_mode(self, enabled: bool):
-        """Activates or deactivates the traffic jam drawing mode."""
         self._is_drawing_traffic = enabled
-        if self._is_drawing_traffic:
-            self.setDragMode(QGraphicsView.DragMode.NoDrag) # Disable panning
-            self._is_drawing_rain_area = False # Ensure rain drawing is off
-            print("Traffic drawing mode ENABLED")
+        self._is_drawing_rain_area = False
+        self._is_drawing_block_way = False
+        self._is_placing_traffic_light_icon = False # Ensure others are off
+        self._is_drawing_traffic_light_line = False
+        if enabled:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.setCursor(Qt.CursorShape.CrossCursor)
         else:
-            # Only restore panning if rain mode is also off
-            if not self._is_drawing_rain_area:
-                self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-            # Clean up unfinished traffic line
-            if self._traffic_line_item:
-                self.scene.removeItem(self._traffic_line_item)
-                self._traffic_line_item = None
-            self._traffic_line_start = None
-            print("Traffic drawing mode DISABLED")
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._cleanup_temp_drawing()
 
     def set_rain_drawing_mode(self, enabled: bool):
-        """Activates or deactivates the rain area drawing mode."""
+        self._is_drawing_traffic = False
         self._is_drawing_rain_area = enabled
-        if self._is_drawing_rain_area:
-            self.setDragMode(QGraphicsView.DragMode.NoDrag) # Disable panning
-            self._is_drawing_traffic = False # Ensure traffic drawing is off
-            print("Rain area drawing mode ENABLED")
+        self._is_drawing_block_way = False
+        self._is_placing_traffic_light_icon = False
+        self._is_drawing_traffic_light_line = False
+        if enabled:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.setCursor(Qt.CursorShape.CrossCursor)
         else:
-            # Only restore panning if traffic mode is also off
-            if not self._is_drawing_traffic:
-                self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-            # Clean up unfinished rain rectangle
-            if self._rain_area_rect_item:
-                self.scene.removeItem(self._rain_area_rect_item)
-                self._rain_area_rect_item = None
-            self._rain_area_start = None
-            print("Rain area drawing mode DISABLED")
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._cleanup_temp_drawing()
+
+    def set_block_way_drawing_mode(self, enabled: bool):
+        self._is_drawing_traffic = False
+        self._is_drawing_rain_area = False
+        self._is_drawing_block_way = enabled
+        self._is_placing_traffic_light_icon = False
+        self._is_drawing_traffic_light_line = False
+        if enabled:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._cleanup_temp_drawing()
+
+    def set_traffic_light_placement_mode(self, enabled: bool):
+        """Activates mode to place the traffic light icon first."""
+        self._is_drawing_traffic = False
+        self._is_drawing_rain_area = False
+        self._is_drawing_block_way = False
+        self._is_placing_traffic_light_icon = enabled
+        self._is_drawing_traffic_light_line = False # Not drawing line yet
+        if enabled:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            # Maybe a specific cursor for placing?
+            self.setCursor(Qt.CursorShape.PointingHandCursor) # Indicate placement
+        else:
+            # If deactivated externally, reset state
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._cleanup_temp_drawing() # Clean up any partial placement
+
+    def _cleanup_temp_drawing(self):
+        """Removes temporary drawing items."""
+        if self._traffic_line_item:
+            self.scene.removeItem(self._traffic_line_item)
+            self._traffic_line_item = None
+        if self._rain_area_rect_item:
+            self.scene.removeItem(self._rain_area_rect_item)
+            self._rain_area_rect_item = None
+        if self._block_way_line_item:
+            self.scene.removeItem(self._block_way_line_item)
+            self._block_way_line_item = None
+        if self._traffic_light_line_item:
+            self.scene.removeItem(self._traffic_light_line_item)
+            self._traffic_light_line_item = None
+        if self._current_traffic_light_icon_item: # Remove temporary icon if placement cancelled
+             self.scene.removeItem(self._current_traffic_light_icon_item)
+             self._current_traffic_light_icon_item = None
+        # Reset drawing state variables
+        self._traffic_line_start = None
+        self._rain_area_start = None
+        self._block_way_start = None
+        self._traffic_light_icon_pos = None
+        self._traffic_light_line_start = None
+
 
     def mousePressEvent(self, event):
-        """Handles mouse press for point selection, starting draws, OR removing effects."""
         pos = self.mapToScene(event.pos())
-        modifiers = event.modifiers()
+        modifiers = QApplication.keyboardModifiers() # Use QApplication for modifiers
 
         # --- Shift+Click: Remove Effect ---
-        if modifiers & Qt.KeyboardModifier.ShiftModifier and event.button() == Qt.MouseButton.LeftButton:
-            item_to_remove = None
-            list_to_update = None
-            # Find item under cursor - itemAt returns topmost item
-            clicked_item = self.itemAt(event.pos())
+        if modifiers == Qt.KeyboardModifier.ShiftModifier and event.button() == Qt.MouseButton.LeftButton:
+            item = self.itemAt(event.pos())
+            if item:
+                removed = False
+                # Check and remove from traffic jam lines
+                if item in self.traffic_jam_lines:
+                    self.scene.removeItem(item)
+                    self.traffic_jam_lines.remove(item)
+                    removed = True
+                # Check and remove from rain areas
+                elif item in self.rain_area_visuals:
+                    self.scene.removeItem(item)
+                    self.rain_area_visuals.remove(item)
+                    removed = True
+                # Check and remove from block ways
+                elif item in self.block_way_visuals:
+                    self.scene.removeItem(item)
+                    self.block_way_visuals.remove(item)
+                    removed = True
+                # Check and remove from traffic lights (remove both icon and line)
+                else:
+                    for i, (icon_item, line_item, _) in enumerate(self.traffic_light_visuals):
+                        if item == icon_item or item == line_item:
+                            self.scene.removeItem(icon_item)
+                            self.scene.removeItem(line_item)
+                            # MainWindow needs to know which specific light was removed
+                            # We can pass the item's data back or handle timer stop in MainWindow based on item removal
+                            removed_data = self.traffic_light_visuals.pop(i)[2] # Get data before removing
+                            item.setData(EFFECT_DATA_KEY, removed_data) # Temporarily store data on item being removed
+                            removed = True
+                            break # Found and removed
 
-            if clicked_item:
-                # Check if it's one of our effect items by checking stored data or list membership
-                if clicked_item in self.traffic_jam_lines:
-                    item_to_remove = clicked_item
-                    list_to_update = self.traffic_jam_lines
-                    print(f"Shift+Click detected on a traffic line.")
-                elif clicked_item in self.rain_area_visuals:
-                    item_to_remove = clicked_item
-                    list_to_update = self.rain_area_visuals
-                    print(f"Shift+Click detected on a rain area.")
-
-            if item_to_remove and list_to_update is not None:
-                self.scene.removeItem(item_to_remove)
-                list_to_update.remove(item_to_remove)
-                print(f"Removed effect visual.")
-                self.effects_changed.emit() # Signal MainWindow to recalculate weights
-                event.accept() # Consume the event
-                return # Don't process further
-
-            # If Shift+Click didn't hit a removable item, maybe allow default behavior?
-            # Or just do nothing. For now, do nothing.
-            event.accept()
-            return
+                if removed:
+                    print(f"Removed effect item at {pos}")
+                    self.effects_changed.emit() # Signal that effects need recalculation
+                    event.accept()
+                    return # Don't process further
+            # If shift-click didn't hit a removable item, fall through to default or other actions
 
         # --- Normal Drawing / Point Selection ---
-        if self._is_drawing_traffic:
-            if event.button() == Qt.MouseButton.LeftButton:
-                self._traffic_line_start = pos
-                pen = QPen(QColor("orange"), 2, Qt.PenStyle.DashLine)
-                # Use QPointF directly
-                self._traffic_line_item = QGraphicsLineItem(self._traffic_line_start.x(), self._traffic_line_start.y(),
-                                                            self._traffic_line_start.x(), self._traffic_line_start.y())
-                self._traffic_line_item.setPen(pen)
-                self.scene.addItem(self._traffic_line_item)
-                event.accept() # Consume event
-            # Prevent default behavior
+        if self._is_placing_traffic_light_icon:
+            # First click: Place the icon
+            self._traffic_light_icon_pos = pos
+            # Draw a temporary icon to show placement
+            self._current_traffic_light_icon_item = self.draw_traffic_light_icon(pos, temporary=True)
+            # Emit signal to MainWindow (it might need durations from sidebar)
+            self.traffic_light_icon_placed.emit(pos)
+            # Transition state: Now expect user to draw the effect line
+            self._is_placing_traffic_light_icon = False
+            self._is_drawing_traffic_light_line = True
+            self._traffic_light_line_start = pos # Line starts from icon center
+            # Keep cross cursor for line drawing
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            print(f"Traffic light icon placed at {pos}, now draw effect line.")
+            event.accept()
+        elif self._is_drawing_traffic_light_line:
+            # This state is primarily handled by move/release for the line
+            # A click here might cancel? Or just start the line draw from icon pos.
+            # Let's assume move/release handles the line drawing after icon placement.
+            # Press event starts the temporary line drawing.
+            if not self._traffic_light_line_item: # Start drawing the line
+                 pen = QPen(QColor("orange"), 2, Qt.PenStyle.DashLine)
+                 self._traffic_light_line_item = QGraphicsLineItem(QLineF(self._traffic_light_line_start, pos))
+                 self._traffic_light_line_item.setPen(pen)
+                 self.scene.addItem(self._traffic_light_line_item)
+                 event.accept()
+        elif self._is_drawing_traffic:
+            self._traffic_line_start = pos
+            pen = QPen(QColor("red"), 2, Qt.PenStyle.DashLine)
+            self._traffic_line_item = QGraphicsLineItem(QLineF(pos, pos))
+            self._traffic_line_item.setPen(pen)
+            self.scene.addItem(self._traffic_line_item)
+            event.accept()
         elif self._is_drawing_rain_area:
-             if event.button() == Qt.MouseButton.LeftButton:
-                 self._rain_area_start = pos
-                 pen = QPen(QColor(0, 150, 255, 150), 2, Qt.PenStyle.DashLine)
-                 brush = QBrush(QColor(0, 150, 255, 50))
-                 self._rain_area_rect_item = QGraphicsRectItem(QRectF(self._rain_area_start, self._rain_area_start))
-                 self._rain_area_rect_item.setPen(pen)
-                 self._rain_area_rect_item.setBrush(brush)
-                 self.scene.addItem(self._rain_area_rect_item)
-                 event.accept() # Consume event
-             # Prevent default behavior
+            self._rain_area_start = pos
+            brush = QBrush(QColor(0, 0, 255, 50)) # Semi-transparent blue
+            pen = QPen(QColor("blue"), 1, Qt.PenStyle.DashLine)
+            self._rain_area_rect_item = QGraphicsRectItem(QRectF(pos, pos))
+            self._rain_area_rect_item.setBrush(brush)
+            self._rain_area_rect_item.setPen(pen)
+            self.scene.addItem(self._rain_area_rect_item)
+            event.accept()
+        elif self._is_drawing_block_way:
+            self._block_way_start = pos
+            pen = QPen(QColor("black"), 3, Qt.PenStyle.DashLine) # Thicker dashed line
+            self._block_way_line_item = QGraphicsLineItem(QLineF(pos, pos))
+            self._block_way_line_item.setPen(pen)
+            self.scene.addItem(self._block_way_line_item)
+            event.accept()
         else:
-            # --- Original Point Selection Logic ---
-            # Draw temporary feedback point immediately on click
-            self.clear_temporary_point(None) # Clear previous temp point
-            temp_color = Qt.GlobalColor.yellow # Color for temporary point
-            self._temporary_point_item = self.draw_point(pos, temp_color, radius=4, temporary=True)
+            # Normal mode: Select start/end point or pan
+            # Check if clicking on an existing permanent marker to clear it
+            item = self.itemAt(event.pos())
+            cleared_point = False
+            if item == self._permanent_start_item:
+                self.clear_permanent_point("start")
+                cleared_point = True
+            elif item == self._permanent_end_item:
+                self.clear_permanent_point("end")
+                cleared_point = True
 
-            # Call the handler in MainWindow to find the nearest node
-            if event.button() == Qt.MouseButton.LeftButton:
-                self.on_point_selected("start", pos.x(), pos.y())
-            elif event.button() == Qt.MouseButton.RightButton:
-                self.on_point_selected("end", pos.x(), pos.y())
+            if cleared_point:
+                 # Also clear the path if a point is cleared
+                 self.clear_path()
+                 # Call the callback to update MainWindow's state
+                 self.on_point_selected(None, -1, -1) # Indicate point cleared
+                 event.accept()
+                 return
 
-            # Allow default behavior ONLY if not selecting points (e.g., middle mouse button)
-            if event.button() not in [Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton]:
-                super().mousePressEvent(event)
+            # If not clearing, proceed with temporary point placement / panning
+            self.draw_point(pos, QColor("gray"), radius=6, temporary=True) # Show click feedback
+            # Let MainWindow find nearest node via callback
+            self.on_point_selected(None, pos.x(), pos.y()) # Let MainWindow decide if it's start/end
+            # Don't accept the event here, allow base class panning if no tool active
+            if self.dragMode() == QGraphicsView.DragMode.ScrollHandDrag:
+                 super().mousePressEvent(event) # Allow panning
             else:
-                event.accept() # Consume left/right clicks if used for selection
+                 event.accept() # Accept if a tool *was* active but we clicked elsewhere
 
 
     def mouseMoveEvent(self, event):
-        """Handles mouse move for drawing traffic line, rain area OR panning."""
-        current_pos = self.mapToScene(event.pos())
-
-        if self._is_drawing_traffic and self._traffic_line_start and self._traffic_line_item:
-            # Update the end point of the temporary line
-            self._traffic_line_item.setLine(self._traffic_line_start.x(), self._traffic_line_start.y(),
-                                            current_pos.x(), current_pos.y())
+        pos = self.mapToScene(event.pos())
+        if self._is_drawing_traffic_light_line and self._traffic_light_line_item:
+            # Update the temporary effect line end point
+            line = self._traffic_light_line_item.line()
+            line.setP2(pos)
+            self._traffic_light_line_item.setLine(line)
             event.accept()
-        elif self._is_drawing_rain_area and self._rain_area_start and self._rain_area_rect_item:
-             # Update the rectangle dimensions
-             rect = QRectF(self._rain_area_start, current_pos).normalized() # Ensure positive width/height
-             self._rain_area_rect_item.setRect(rect)
-             event.accept()
-        elif event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton) and not self._is_drawing_traffic and not self._is_drawing_rain_area:
-             # Prevent panning if left/right mouse is down for point selection (even if mouse moves slightly)
-             event.accept()
+        elif self._is_drawing_traffic and self._traffic_line_item:
+            line = self._traffic_line_item.line()
+            line.setP2(pos)
+            self._traffic_line_item.setLine(line)
+            event.accept()
+        elif self._is_drawing_rain_area and self._rain_area_rect_item:
+            rect = QRectF(self._rain_area_start, pos).normalized()
+            self._rain_area_rect_item.setRect(rect)
+            event.accept()
+        elif self._is_drawing_block_way and self._block_way_line_item:
+            line = self._block_way_line_item.line()
+            line.setP2(pos)
+            self._block_way_line_item.setLine(line)
+            event.accept()
         else:
-            # Allow default behavior (panning)
+            # Allow panning
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        """Handles mouse release to finalize traffic line, rain area OR finish panning."""
-        end_pos = self.mapToScene(event.pos())
+        pos = self.mapToScene(event.pos())
+        if self._is_drawing_traffic_light_line and self._traffic_light_line_item:
+            # Finalize traffic light placement: create permanent visuals
+            line = self._traffic_light_line_item.line()
+            final_icon_pos = self._traffic_light_icon_pos
+            final_line_start = line.p1() # Should be same as icon pos
+            final_line_end = line.p2()
 
-        if self._is_drawing_traffic and self._traffic_line_start and event.button() == Qt.MouseButton.LeftButton:
-            # Remove temporary drawing item
-            if self._traffic_line_item:
-                self.scene.removeItem(self._traffic_line_item)
-                self._traffic_line_item = None
+            # Remove temporary items
+            self.scene.removeItem(self._traffic_light_line_item)
+            self._traffic_light_line_item = None
+            if self._current_traffic_light_icon_item: # Remove temp icon used during line draw
+                self.scene.removeItem(self._current_traffic_light_icon_item)
+                self._current_traffic_light_icon_item = None
 
-            # Create the final, persistent line item
-            pen = QPen(QColor("orange"), 3)
-            final_line = QGraphicsLineItem(self._traffic_line_start.x(), self._traffic_line_start.y(),
-                                           end_pos.x(), end_pos.y())
-            final_line.setPen(pen)
+            # Create permanent visuals (icon and line)
+            perm_icon_item = self.draw_traffic_light_icon(final_icon_pos)
+            perm_line_item = self.draw_traffic_light_effect_line(final_line_start, final_line_end)
 
-            # Store effect data (e.g., weight) - MainWindow will provide this via signal/slot later
-            # For now, emit the raw line data
-            # final_line.setData(EFFECT_DATA_KEY, {"type": "traffic", "weight": traffic_weight}) # Placeholder
+            # Store visuals (MainWindow will add data later via signal handler)
+            # Store placeholder data for now
+            traffic_light_data = {"type": "traffic_light", "icon_pos": final_icon_pos, "line_start": final_line_start, "line_end": final_line_end}
+            perm_icon_item.setData(EFFECT_DATA_KEY, traffic_light_data) # Link data
+            perm_line_item.setData(EFFECT_DATA_KEY, traffic_light_data) # Link data
+            self.traffic_light_visuals.append((perm_icon_item, perm_line_item, traffic_light_data))
 
-            self.scene.addItem(final_line)
-            self.traffic_jam_lines.append(final_line) # Store the persistent item
+            # Emit signal with all info
+            self.traffic_light_line_drawn.emit(final_icon_pos, final_line_start, final_line_end)
 
-            # Emit signal for MainWindow to handle weight calculation
-            self.traffic_line_drawn.emit(self._traffic_line_start, end_pos)
-            print(f"Traffic line finalized from {self._traffic_line_start} to {end_pos}")
-            self._traffic_line_start = None
+            # Reset state and cursor
+            self._is_drawing_traffic_light_line = False
+            self._traffic_light_icon_pos = None
+            self._traffic_light_line_start = None
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            # Uncheck the button in the sidebar
+            # self.parent().sidebar.traffic_light_button.setChecked(False) # Requires access to parent/sidebar
             event.accept()
 
-        elif self._is_drawing_rain_area and self._rain_area_start and event.button() == Qt.MouseButton.LeftButton:
-             # Finalize the rain area rectangle
-             if self._rain_area_rect_item:
-                 final_rect = self._rain_area_rect_item.rect() # Get the final rect geometry
+        elif self._is_drawing_traffic and self._traffic_line_item:
+            # Finalize traffic jam line
+            final_line = self._traffic_line_item.line()
+            self.scene.removeItem(self._traffic_line_item)
+            self._traffic_line_item = None
 
-                 # Make the temporary item permanent (or draw a new one)
-                 pen = QPen(QColor(0, 100, 200, 180), 2) # Slightly darker solid blue border
-                 brush = QBrush(QColor(0, 150, 255, 70)) # Slightly less transparent fill
-                 self._rain_area_rect_item.setPen(pen)
-                 self._rain_area_rect_item.setBrush(brush)
+            perm_line = QGraphicsLineItem(final_line)
+            perm_line.setPen(QPen(QColor("red"), 2))
+            perm_line.setToolTip("Traffic Jam")
+            self.scene.addItem(perm_line)
+            self.traffic_jam_lines.append(perm_line) # Store permanent item
 
-                 # Store effect data (e.g., weight) - MainWindow will provide this
-                 # self._rain_area_rect_item.setData(EFFECT_DATA_KEY, {"type": "rain", "weight": rain_weight}) # Placeholder
+            self.traffic_line_drawn.emit(final_line.p1(), final_line.p2()) # Emit signal
 
-                 # Keep the item, store it
-                 self.rain_area_visuals.append(self._rain_area_rect_item)
-                 self._rain_area_rect_item = None # Reset temporary item holder
+            # Reset state, cursor, and uncheck button
+            self._is_drawing_traffic = False
+            self._traffic_line_start = None
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            # self.parent().sidebar.traffic_jam_button.setChecked(False)
+            event.accept()
 
-                 # Emit the signal with the rectangle coordinates for MainWindow
-                 self.rain_area_defined.emit(final_rect)
-                 print(f"Rain area finalized: {final_rect}") # Debug
-             self._rain_area_start = None
-             event.accept()
-             # Optional: Deactivate drawing mode automatically after one area?
-             # self.set_rain_drawing_mode(False)
-             # self.parent().sidebar.rain_area_button.setChecked(False) # If you have access to parent
+        elif self._is_drawing_rain_area and self._rain_area_rect_item:
+            # Finalize rain area
+            final_rect = self._rain_area_rect_item.rect()
+            self.scene.removeItem(self._rain_area_rect_item)
+            self._rain_area_rect_item = None
+
+            perm_rect = QGraphicsRectItem(final_rect)
+            perm_rect.setBrush(QBrush(QColor(0, 0, 255, 80))) # Slightly less transparent final
+            perm_rect.setPen(QPen(QColor("blue"), 1))
+            perm_rect.setToolTip("Rain Area")
+            self.scene.addItem(perm_rect)
+            self.rain_area_visuals.append(perm_rect) # Store permanent item
+
+            self.rain_area_defined.emit(final_rect) # Emit signal
+
+            # Reset state, cursor, and uncheck button
+            self._is_drawing_rain_area = False
+            self._rain_area_start = None
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            # self.parent().sidebar.rain_area_button.setChecked(False)
+            event.accept()
+
+        elif self._is_drawing_block_way and self._block_way_line_item:
+            # Finalize block way line
+            final_line = self._block_way_line_item.line()
+            self.scene.removeItem(self._block_way_line_item)
+            self._block_way_line_item = None
+
+            perm_line = QGraphicsLineItem(final_line)
+            perm_line.setPen(QPen(QColor("black"), 3)) # Solid black line
+            perm_line.setToolTip("Blocked Way")
+            self.scene.addItem(perm_line)
+            self.block_way_visuals.append(perm_line) # Store permanent item
+
+            self.block_way_drawn.emit(final_line.p1(), final_line.p2()) # Emit signal
+
+            # Reset state, cursor, and uncheck button
+            self._is_drawing_block_way = False
+            self._block_way_start = None
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            # self.parent().sidebar.block_way_button.setChecked(False)
+            event.accept()
+
         else:
-            # Allow default behavior (e.g., finishing a pan)
+            # Clear temporary selection point if it exists
+            self.clear_temporary_point()
+            # Allow panning release
             super().mouseReleaseEvent(event)
 
+
     # --- Point Drawing ---
-    def draw_point(self, pos: QPointF, color, radius=5, temporary=False):
-        """Draws a point on the map and returns the QGraphicsEllipseItem."""
-        pen = QPen(color)
-        brush = QBrush(color)
-        # Create and add the ellipse item
-        ellipse = QGraphicsEllipseItem(pos.x() - radius, pos.y() - radius, 2 * radius, 2 * radius)
-        ellipse.setPen(pen)
-        ellipse.setBrush(brush)
+    def draw_point(self, pos: QPointF, color, radius=5, temporary=False, point_type=None):
+        """Draws a point (circle) on the map."""
+        # Clear previous temporary point if drawing a new one
         if temporary:
-            ellipse.setZValue(10) # Ensure temporary point is visible
+            self.clear_temporary_point(point_type) # Pass type to clear specific temp if needed
+
+        ellipse = QGraphicsEllipseItem(pos.x() - radius, pos.y() - radius, 2 * radius, 2 * radius)
+        ellipse.setBrush(QBrush(color))
+        ellipse.setPen(QPen(Qt.PenStyle.NoPen)) # No border for points usually
         self.scene.addItem(ellipse)
+
+        if temporary:
+            self._temporary_point_item = ellipse # Store reference to temporary item
         return ellipse # Return the item
 
-    def clear_temporary_point(self, point_type=None): # Added point_type argument (optional)
-        """Removes the temporary yellow feedback point."""
+    def clear_temporary_point(self, point_type=None): # Added point_type, though not used yet
+        """Removes the temporary point marker from the scene."""
         if self._temporary_point_item:
             self.scene.removeItem(self._temporary_point_item)
             self._temporary_point_item = None
 
     def set_permanent_point(self, point_type, pos: QPointF):
-        """Removes the temporary point and draws the final start/end point."""
-        self.clear_temporary_point() # Remove yellow dot
-
+        """Sets or updates the permanent start or end point marker."""
         if point_type == "start":
             if self._permanent_start_item:
                 self.scene.removeItem(self._permanent_start_item)
-            self._permanent_start_item = self.draw_point(pos, Qt.GlobalColor.green)
+            self._permanent_start_item = self.draw_point(pos, QColor("green"), radius=7)
+            self._permanent_start_item.setToolTip(f"Start Point ({pos.x():.1f}, {pos.y():.1f})")
         elif point_type == "end":
             if self._permanent_end_item:
                 self.scene.removeItem(self._permanent_end_item)
-            self._permanent_end_item = self.draw_point(pos, Qt.GlobalColor.red)
+            self._permanent_end_item = self.draw_point(pos, QColor("blue"), radius=7)
+            self._permanent_end_item.setToolTip(f"End Point ({pos.x():.1f}, {pos.y():.1f})")
+
+    def clear_permanent_point(self, point_type):
+        """Clears a specific permanent point marker."""
+        if point_type == "start" and self._permanent_start_item:
+            self.scene.removeItem(self._permanent_start_item)
+            self._permanent_start_item = None
+        elif point_type == "end" and self._permanent_end_item:
+            self.scene.removeItem(self._permanent_end_item)
+            self._permanent_end_item = None
+
+    # --- Traffic Light Visuals --- New Methods ---
+    def draw_traffic_light_icon(self, pos: QPointF, temporary=False):
+        """Draws the traffic light icon at the given position."""
+        if TRAFFIC_LIGHT_PIXMAP.isNull(): # Fallback if icon failed to load
+            # Draw a simple placeholder, e.g., a colored circle
+            radius = 8
+            ellipse = QGraphicsEllipseItem(pos.x() - radius, pos.y() - radius, 2 * radius, 2 * radius)
+            ellipse.setBrush(QBrush(QColor("purple"))) # Placeholder color
+            ellipse.setPen(QPen(Qt.PenStyle.NoPen))
+            item = ellipse
+        else:
+            pixmap_item = QGraphicsPixmapItem(TRAFFIC_LIGHT_PIXMAP)
+            # Center the pixmap on the position
+            pixmap_item.setOffset(pos - QPointF(TRAFFIC_LIGHT_PIXMAP.width() / 2, TRAFFIC_LIGHT_PIXMAP.height() / 2))
+            item = pixmap_item
+
+        item.setToolTip("Traffic Light")
+        if temporary:
+             item.setOpacity(0.7) # Make temporary visuals slightly transparent
+        self.scene.addItem(item)
+        return item
+
+    def draw_traffic_light_effect_line(self, p1: QPointF, p2: QPointF):
+        """Draws the permanent effect line for a traffic light."""
+        line = QGraphicsLineItem(QLineF(p1, p2))
+        # Use a distinct style, maybe orange?
+        pen = QPen(QColor("orange"), 2, Qt.PenStyle.SolidLine)
+        line.setPen(pen)
+        line.setToolTip("Traffic Light Effect Area")
+        self.scene.addItem(line)
+        return line
+
+    def update_traffic_light_visual_state(self, icon_item, state_color_name):
+        """Updates the visual appearance (e.g., tooltip) of a traffic light icon."""
+        # For now, just update the tooltip. Could potentially change icon color overlay later.
+        color_map = {"red": "Red", "yellow": "Yellow", "green": "Green"}
+        state_text = color_map.get(state_color_name, "Unknown")
+        icon_item.setToolTip(f"Traffic Light ({state_text})")
+        # Example: Add a small status indicator (optional)
+        # Could add/remove a small colored circle next to the icon
+
 
     # --- Clearing Methods ---
     def clear_path(self):
-        """Removes the currently drawn path from the scene."""
         for item in self.path_items:
-            if item.scene() == self.scene: # Check if still in scene
-                 self.scene.removeItem(item)
-        self.path_items.clear() # Clear the list
+            self.scene.removeItem(item)
+        self.path_items.clear()
 
     def clear_traffic_jams(self):
-        """Removes all drawn traffic jam lines from the scene."""
         for item in self.traffic_jam_lines:
-             if item.scene() == self.scene:
-                 self.scene.removeItem(item)
+            self.scene.removeItem(item)
         self.traffic_jam_lines.clear()
-        print("Cleared traffic jam visuals") # Debug
 
     def clear_rain_areas(self):
-        """Removes all drawn rain area visuals from the scene."""
         for item in self.rain_area_visuals:
-             if item.scene() == self.scene:
-                 self.scene.removeItem(item)
+            self.scene.removeItem(item)
         self.rain_area_visuals.clear()
-        print("Cleared rain area visuals") # Debug
+
+    def clear_block_ways(self):
+        for item in self.block_way_visuals:
+            self.scene.removeItem(item)
+        self.block_way_visuals.clear()
+
+    def clear_traffic_lights(self):
+        """Clears all traffic light visuals."""
+        for icon_item, line_item, _ in self.traffic_light_visuals:
+            if icon_item and icon_item.scene() == self.scene: # Check if still in scene
+                 self.scene.removeItem(icon_item)
+            if line_item and line_item.scene() == self.scene:
+                 self.scene.removeItem(line_item)
+        self.traffic_light_visuals.clear()
+        # Note: Timers associated with these need to be stopped in MainWindow
+
+    def clear_all_effects(self):
+        """Clears all types of effects."""
+        self.clear_traffic_jams()
+        self.clear_rain_areas()
+        self.clear_block_ways()
+        self.clear_traffic_lights()
+        self.effects_changed.emit() # Signal recalculation after clearing all
 
     # --- Path Drawing ---
     def draw_path(self, path, node_positions):
-        """Draws the calculated path on the map."""
-        self.clear_path() # Clear any existing path first
-
+        self.clear_path()
         if not path or len(path) < 2:
-            return # Nothing to draw
+            return
 
-        pen = QPen(Qt.GlobalColor.blue, 3) # Use a QPen object
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap) # Nicer line ends
-
+        pen = QPen(QColor("magenta"), 3) # Path color
         for i in range(len(path) - 1):
             try:
-                start_node_name = path[i]
-                end_node_name = path[i+1]
-                start_pos_tuple = node_positions[start_node_name]
-                end_pos_tuple = node_positions[end_node_name]
-
-                # Convert tuples to QPointF for clarity if needed, though numbers work
-                start_point = QPointF(start_pos_tuple[0], start_pos_tuple[1])
-                end_point = QPointF(end_pos_tuple[0], end_pos_tuple[1])
-
-                line = QGraphicsLineItem(start_point.x(), start_point.y(), end_point.x(), end_point.y())
+                u, v = path[i], path[i+1]
+                pos_u = QPointF(*node_positions[u]) # Unpack tuple
+                pos_v = QPointF(*node_positions[v]) # Unpack tuple
+                line = QGraphicsLineItem(QLineF(pos_u, pos_v))
                 line.setPen(pen)
-                line.setZValue(5) # Draw path above effects?
+                line.setZValue(1) # Draw path above effects slightly
                 self.scene.addItem(line)
-                self.path_items.append(line) # Store reference
-
+                self.path_items.append(line)
             except KeyError as e:
-                print(f"Warning: Node {e} not found in node_positions while drawing path.")
+                print(f"Warning: Node position not found for {e} while drawing path.")
             except Exception as e:
-                print(f"Error drawing path segment between {start_node_name} and {end_node_name}: {e}")
-
+                print(f"Error drawing path segment: {e}")
 
     # --- Zooming ---
     def wheelEvent(self, event):
-        """Handles mouse wheel events for zooming."""
-        # Disable zoom if any drawing mode is active
-        if not self._is_drawing_traffic and not self._is_drawing_rain_area:
-            zoom_in_factor = 1.15
-            zoom_out_factor = 1 / zoom_in_factor
-            # Anchor zoom point
-            self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-            if event.angleDelta().y() > 0:
-                zoom_factor = zoom_in_factor
-            else:
-                zoom_factor = zoom_out_factor
-            self.scale(zoom_factor, zoom_factor)
-            # Update internal scale factor if needed for other calculations
-            self.scale_factor *= zoom_factor
-            # Reset anchor
-            self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
-        # else:
-            # print("Zoom disabled while drawing.")
+        zoom_in_factor = 1.1
+        zoom_out_factor = 1 / zoom_in_factor
 
-    # --- Helper to get sidebar tool instance (needed for storing data) ---
-    # This is not ideal coupling, consider passing data explicitly
-    def _get_sidebar_tool(self, tool_type):
-        """ Tries to get the tool instance from the sidebar (assumes parent structure). """
-        try:
-            # This assumes MainWindow is the parent, and it has a 'sidebar' attribute
-            sidebar = self.parent().sidebar
-            if tool_type == "traffic":
-                return sidebar.traffic_tool
-            elif tool_type == "rain":
-                return sidebar.rain_tool
-        except AttributeError:
-            print("Warning: Could not access sidebar tools from MapViewer.")
-        return None
+        # Save the scene pos
+        old_pos = self.mapToScene(event.position().toPoint())
+
+        # Zoom
+        if event.angleDelta().y() > 0:
+            zoom_factor = zoom_in_factor
+        else:
+            zoom_factor = zoom_out_factor
+        self.scale(zoom_factor, zoom_factor)
+        self.scale_factor *= zoom_factor
+
+        # Get the new position
+        new_pos = self.mapToScene(event.position().toPoint())
+
+        # Move scene to keep mouse pointer over the same spot
+        delta = new_pos - old_pos
+        self.translate(delta.x(), delta.y())
+
+    # --- Helper (Consider removing if not needed) ---
+    # def _get_sidebar_tool(self, tool_type):
+    #     # This approach is generally discouraged (tight coupling)
+    #     # Pass necessary data (like durations) through signals instead.
+    #     # Placeholder if absolutely needed, but try to avoid.
+    #     # if hasattr(self.parent(), 'sidebar'):
+    #     #     if tool_type == 'traffic_light':
+    #     #         return self.parent().sidebar.traffic_light_tool
+    #     return None
 
 
 

@@ -1,30 +1,42 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame, QRadioButton, QButtonGroup, QGroupBox, QPushButton, QComboBox
+import os
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QFrame, QRadioButton,
+                             QButtonGroup, QGroupBox, QPushButton, QComboBox,
+                             QSpinBox, QHBoxLayout, QFormLayout) # Added QSpinBox, QHBoxLayout, QFormLayout
 from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtGui import QIcon # Import QIcon
+from PyQt6.QtGui import QIcon
 from .custom_widgets import FindPathButton
 from .tools.traffic import TrafficTool
-from .tools.rain import RainTool # Import the new RainTool
-import os
+from .tools.rain import RainTool
+from .tools.block import BlockWayTool
+from .tools.traffic_light_tool import TrafficLightTool, TrafficLightState # Import new tool
 
 class Sidebar(QFrame):
     # Signal to indicate the traffic jam tool should be activated/deactivated
     traffic_tool_activated = pyqtSignal(bool)
     # Signal for rain tool activation
     rain_tool_activated = pyqtSignal(bool)
+    # Signal for block way tool activation
+    block_way_tool_activated = pyqtSignal(bool) # New signal
+    # Signal for traffic light tool activation (placement mode)
+    traffic_light_tool_activated = pyqtSignal(bool) # New signal
 
     def __init__(self, parent=None):
         super().__init__(parent)
 
         self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setFixedWidth(200)
+        self.setFixedWidth(250) # Increased width slightly for new inputs
 
         layout = QVBoxLayout(self)
 
         # --- Instantiate Tools ---
         self.traffic_tool = TrafficTool() # Create an instance of the traffic tool
         self.rain_tool = RainTool()       # Create an instance of the rain tool
+        self.block_way_tool = BlockWayTool() # Create an instance of the block way tool
+        self.traffic_light_tool = TrafficLightTool() # Instantiate the new tool
         self._traffic_tool_active = False # Track activation state
         self._rain_tool_active = False    # Track rain tool activation state
+        self._block_way_tool_active = False # Track block way tool activation state
+        self._traffic_light_tool_active = False # Track activation state
 
         # --- Sidebar Contents ---
         title_label = QLabel("Tools")
@@ -40,6 +52,7 @@ class Sidebar(QFrame):
         # Find Path Button - Use the custom widget
         self.find_path_button = FindPathButton() # Instantiate the custom button
         layout.addWidget(self.find_path_button)
+
 
         # --- Traffic Jam Tool ---
         traffic_group_box = QGroupBox("Traffic Jam")
@@ -134,41 +147,140 @@ class Sidebar(QFrame):
         layout.addWidget(rain_group_box)
 
 
-        # Add more widgets here if needed
+        # --- Block Way Tool --- New Section ---
+        block_way_group_box = QGroupBox("Block Way")
+        block_way_layout = QVBoxLayout()
+
+        self.block_way_button = QPushButton(" Draw Block")
+        self.block_way_button.setCheckable(True)
+        self.block_way_button.toggled.connect(self._toggle_block_way_tool)
+
+        # --- Add Block Way Icon (Optional) ---
+        # Create or find an icon like 'block.png' or 'stop.png'
+        icon_path_block = os.path.join(os.path.dirname(__file__), 'assets', 'icons', 'block.png') # Assuming block.png exists
+        icon_block = QIcon(icon_path_block)
+        if not icon_block.isNull():
+            self.block_way_button.setIcon(icon_block)
+        else:
+            print(f"Warning: Could not load block way icon: {icon_path_block}")
+        # --- End Add Icon ---
+
+        block_way_layout.addWidget(self.block_way_button)
+        block_way_group_box.setLayout(block_way_layout)
+        layout.addWidget(block_way_group_box)
+        # --- End Block Way Tool ---
+
+        # --- Traffic Light Tool --- New Section ---
+        traffic_light_group_box = QGroupBox("Traffic Light")
+        traffic_light_outer_layout = QVBoxLayout() # Use QVBoxLayout for the group
+
+        # Button to activate placement mode
+        self.traffic_light_button = QPushButton(" Place Traffic Light")
+        self.traffic_light_button.setCheckable(True)
+        self.traffic_light_button.toggled.connect(self._toggle_traffic_light_tool)
+
+        # --- Add Traffic Light Icon ---
+        icon_path_light = os.path.join(os.path.dirname(__file__),'assets', 'icons', 'traffic-light.png')
+        icon_light = QIcon(icon_path_light)
+        if not icon_light.isNull():
+            self.traffic_light_button.setIcon(icon_light)
+        else:
+            print(f"Warning: Could not load icon: {icon_path_light}")
+        traffic_light_outer_layout.addWidget(self.traffic_light_button)
+
+        # Duration Inputs using QFormLayout for better alignment
+        duration_layout = QFormLayout()
+        duration_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow) # Allow fields to expand
+
+        self.duration_spinbox_red = QSpinBox()
+        self.duration_spinbox_red.setSuffix(" s")
+        self.duration_spinbox_red.setRange(1, 300) # 1 second to 5 minutes
+        self.duration_spinbox_red.setValue(self.traffic_light_tool.default_durations[TrafficLightState.RED])
+        duration_layout.addRow("Red Duration:", self.duration_spinbox_red)
+
+        self.duration_spinbox_yellow = QSpinBox()
+        self.duration_spinbox_yellow.setSuffix(" s")
+        self.duration_spinbox_yellow.setRange(1, 60) # 1 second to 1 minute
+        self.duration_spinbox_yellow.setValue(self.traffic_light_tool.default_durations[TrafficLightState.YELLOW])
+        duration_layout.addRow("Yellow Duration:", self.duration_spinbox_yellow)
+
+        self.duration_spinbox_green = QSpinBox()
+        self.duration_spinbox_green.setSuffix(" s")
+        self.duration_spinbox_green.setRange(1, 300) # 1 second to 5 minutes
+        self.duration_spinbox_green.setValue(self.traffic_light_tool.default_durations[TrafficLightState.GREEN])
+        duration_layout.addRow("Green Duration:", self.duration_spinbox_green)
+
+        # Add the duration form layout to the main group layout
+        traffic_light_outer_layout.addLayout(duration_layout)
+
+        traffic_light_group_box.setLayout(traffic_light_outer_layout)
+        layout.addWidget(traffic_light_group_box)
+        # --- End Traffic Light Tool ---
 
         layout.addStretch() # Pushes content to the top
 
+    # --- Add this method ---
+    def get_current_traffic_light_durations(self):
+        """Retrieves the current duration values from the UI spin boxes."""
+        return {
+            TrafficLightState.RED: self.duration_spinbox_red.value(),
+            TrafficLightState.YELLOW: self.duration_spinbox_yellow.value(),
+            TrafficLightState.GREEN: self.duration_spinbox_green.value()
+        }
+    # --- End of added method ---
+
+    def _uncheck_other_tools(self, sender):
+        """Unchecks other tool buttons when one is activated."""
+        buttons = [
+            self.traffic_jam_button,
+            self.rain_area_button,
+            self.block_way_button,
+            self.traffic_light_button # Include new button
+        ]
+        for button in buttons:
+            if button is not sender and button.isChecked():
+                button.setChecked(False) # This will trigger their toggled(false) signal
+
     def _toggle_traffic_tool(self, checked):
-        """Handles the traffic jam button toggle."""
-        if checked:
-            # Deactivate rain tool if activating traffic tool
-            if self._rain_tool_active:
-                self.rain_area_button.setChecked(False) # This will trigger _toggle_rain_tool(False)
         self._traffic_tool_active = checked
-        self.traffic_tool_activated.emit(checked) # Emit the signal
-        print(f"Traffic tool {'activated' if checked else 'deactivated'}") # For debugging
+        if checked:
+            self._uncheck_other_tools(self.traffic_jam_button)
+        self.traffic_tool_activated.emit(checked)
+        print(f"Traffic Tool {'Activated' if checked else 'Deactivated'}")
 
     def _toggle_rain_tool(self, checked):
-        """Handles the rain area button toggle."""
-        if checked:
-             # Deactivate traffic tool if activating rain tool
-            if self._traffic_tool_active:
-                self.traffic_jam_button.setChecked(False) # This will trigger _toggle_traffic_tool(False)
         self._rain_tool_active = checked
-        self.rain_tool_activated.emit(checked) # Emit the signal for rain tool
-        print(f"Rain tool {'activated' if checked else 'deactivated'}") # For debugging
+        if checked:
+            self._uncheck_other_tools(self.rain_area_button)
+        self.rain_tool_activated.emit(checked)
+        print(f"Rain Tool {'Activated' if checked else 'Deactivated'}")
 
+    def _toggle_block_way_tool(self, checked):
+        self._block_way_tool_active = checked
+        if checked:
+            self._uncheck_other_tools(self.block_way_button)
+        self.block_way_tool_activated.emit(checked)
+        print(f"Block Way Tool {'Activated' if checked else 'Deactivated'}")
+
+    def _toggle_traffic_light_tool(self, checked):
+        """Handles activation/deactivation of the traffic light placement tool."""
+        self._traffic_light_tool_active = checked
+        if checked:
+            self._uncheck_other_tools(self.traffic_light_button)
+        # This signal tells MapViewer to enter the mode for placing the icon
+        self.traffic_light_tool_activated.emit(checked)
+        print(f"Traffic Light Tool {'Activated' if checked else 'Deactivated'}")
 
     def _update_traffic_weight_from_combo(self, index):
-        """Updates the traffic tool's weight based on ComboBox selection."""
-        selected_weight = self.intensity_combo_traffic.itemData(index)
+        selected_weight = self.intensity_combo_traffic.currentData()
         if selected_weight is not None:
             self.traffic_tool.set_weight(selected_weight)
-            print(f"Traffic weight set to: {selected_weight}") # For debugging
+            print(f"Traffic intensity set to: {selected_weight}")
+            # No need to recalculate here, it happens when line is drawn/effects
 
     def _update_rain_intensity_from_combo(self, index):
-        """Updates the rain tool's intensity based on ComboBox selection."""
-        selected_intensity_name = self.intensity_combo_rain.itemData(index)
+        """Updates the rain tool's intensity based on the combo box selection."""
+        selected_intensity_name = self.intensity_combo_rain.currentData()
         if selected_intensity_name is not None:
             self.rain_tool.set_intensity(selected_intensity_name)
-            # Debugging print is inside rain_tool.set_intensity
+            print(f"Rain intensity set to: {selected_intensity_name}")

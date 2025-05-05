@@ -1,6 +1,7 @@
 import sqlite3  # Import the sqlite3 module
 import networkx as nx
 import os  # Import os to check if file exists
+import numpy as np # Import numpy for infinity
 
 
 class Pathfinding:
@@ -30,7 +31,8 @@ class Pathfinding:
             edges = cursor.fetchall()
             for node_from, node_to, weight in edges:
                 # Add directed edge with weight attribute
-                self.graph.add_edge(node_from, node_to, weight=weight)
+                # Ensure weight is float for potential inf values
+                self.graph.add_edge(node_from, node_to, weight=float(weight))
 
         except sqlite3.Error as e:
             print(f"SQLite error: {e}")
@@ -39,17 +41,27 @@ class Pathfinding:
             if conn:
                 conn.close()  # Ensure connection is closed even if errors occur
 
-    def find_path(self, start_node, end_node):
-        """Finds the shortest path using A* algorithm."""
+    def get_node_positions(self):
+        """Returns a dictionary of node positions {node_id: (x, y)}."""
+        positions = {}
+        for node, data in self.graph.nodes(data=True):
+            if 'pos' in data:
+                positions[node] = data['pos']
+            else:
+                print(f"Warning: Node {node} is missing position data.")
+                # Assign a default position or handle as needed
+                positions[node] = (0, 0) # Example default
+        return positions
+
+
+    def find_shortest_path(self, start_node, end_node):
+        """Finds the shortest path using A* algorithm and returns path and cost."""
         # A* needs a heuristic function, typically distance.
         # We'll use Euclidean distance based on 'pos' attribute.
         def heuristic(u, v):
             # Check if nodes exist before accessing attributes
             if u not in self.graph.nodes or v not in self.graph.nodes:
-                 # Handle cases where heuristic is called on non-existent nodes if necessary
-                 # This might happen depending on the algorithm's internal workings
-                 # For A*, it usually operates on existing nodes, but safety check is good.
-                 return float('inf') # Or some other appropriate value/error handling
+                 return float('inf')
 
             if 'pos' not in self.graph.nodes[u] or 'pos' not in self.graph.nodes[v]:
                 print(f"Warning: 'pos' attribute missing for node {u} or {v}")
@@ -68,25 +80,25 @@ class Pathfinding:
             # Check if start and end nodes exist in the graph
             if start_node not in self.graph:
                 print(f"Error: Start node '{start_node}' not found in the graph.")
-                return None
+                return None, np.inf # Return path=None, cost=inf
             if end_node not in self.graph:
                 print(f"Error: End node '{end_node}' not found in the graph.")
-                return None
+                return None, np.inf # Return path=None, cost=inf
 
             # Use 'weight' attribute for edge costs and the heuristic function
             # A* works correctly with DiGraph
             path = nx.astar_path(self.graph, start_node, end_node, heuristic=heuristic, weight='weight')
-            return path
+            # Calculate the cost of the path
+            cost = nx.astar_path_length(self.graph, start_node, end_node, heuristic=heuristic, weight='weight')
+            return path, cost
         except nx.NetworkXNoPath:
             print(f"No path found between {start_node} and {end_node}")
-            return None
+            return None, np.inf # Return path=None, cost=inf
         except KeyError as e:
-            # This might still catch issues if heuristic accesses a non-existent node attribute
-            # despite checks inside heuristic, depending on exact execution flow.
             print(f"Error: Attribute access issue for node {e} during pathfinding.")
-            return None
+            return None, np.inf
         except Exception as e: # Catch other potential errors
             print(f"An unexpected error occurred during pathfinding: {e}")
-            return None
+            return None, np.inf
 
 
