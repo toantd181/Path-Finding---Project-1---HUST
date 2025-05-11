@@ -9,6 +9,7 @@ from .tools.traffic import TrafficTool
 from .tools.rain import RainTool
 from .tools.block import BlockWayTool
 from .tools.traffic_light_tool import TrafficLightTool, TrafficLightState # Import new tool
+# from .tools.car_mode_tool import CarModeTool # Import the new CarModeTool # No longer needed if tool is simple
 
 class Sidebar(QFrame):
     # Signal to indicate the traffic jam tool should be activated/deactivated
@@ -19,6 +20,10 @@ class Sidebar(QFrame):
     block_way_tool_activated = pyqtSignal(bool) # New signal
     # Signal for traffic light tool activation (placement mode)
     traffic_light_tool_activated = pyqtSignal(bool) # New signal
+    # Signal for car mode state activation
+    car_mode_state_activated = pyqtSignal(bool) # Renamed signal for Car Mode state
+    # Signal for place car block point drawing tool activation
+    place_car_block_drawing_tool_activated = pyqtSignal(bool) # New signal for placing block points
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -33,10 +38,13 @@ class Sidebar(QFrame):
         self.rain_tool = RainTool()       # Create an instance of the rain tool
         self.block_way_tool = BlockWayTool() # Create an instance of the block way tool
         self.traffic_light_tool = TrafficLightTool() # Instantiate the new tool
+        # self.car_mode_tool = CarModeTool() # CarModeTool instance might not be needed if logic is simple
         self._traffic_tool_active = False # Track activation state
         self._rain_tool_active = False    # Track rain tool activation state
         self._block_way_tool_active = False # Track block way tool activation state
         self._traffic_light_tool_active = False # Track activation state
+        self._car_mode_state_active = False # Track Car Mode state
+        self._place_car_block_drawing_active = False # Track Car Mode drawing activation state
 
         # --- Sidebar Contents ---
         title_label = QLabel("Tools")
@@ -217,6 +225,38 @@ class Sidebar(QFrame):
         layout.addWidget(traffic_light_group_box)
         # --- End Traffic Light Tool ---
 
+        # --- Car Mode Tool --- New Section ---
+        car_mode_group_box = QGroupBox("Car Mode (Block Edge)")
+        car_mode_layout = QVBoxLayout()
+
+        self.toggle_car_mode_button = QPushButton("Enable Car Mode") # Renamed
+        self.toggle_car_mode_button.setCheckable(True)
+        self.toggle_car_mode_button.toggled.connect(self._toggle_car_mode_state) # Renamed handler
+
+        # --- Add Car Mode Icon (Optional) ---
+        # Create or find an icon like 'car-block.png' or 'no-entry.png'
+        icon_path_car_block = os.path.join(os.path.dirname(__file__), 'assets', 'icons', 'car-block.png') # Assuming car-block.png exists
+        icon_car_block = QIcon(icon_path_car_block)
+        if not icon_car_block.isNull():
+            self.toggle_car_mode_button.setIcon(icon_car_block) # Apply to toggle button
+        else:
+            print(f"Warning: Could not load car mode icon: {icon_path_car_block}")
+        # --- End Add Icon ---
+        car_mode_layout.addWidget(self.toggle_car_mode_button)
+
+        self.place_car_block_button = QPushButton(" Place Car Block Point")
+        self.place_car_block_button.setCheckable(True)
+        self.place_car_block_button.setEnabled(False) # Initially disabled
+        self.place_car_block_button.toggled.connect(self._toggle_place_car_block_drawing_tool)
+        if not icon_car_block.isNull(): # Reuse icon
+            self.place_car_block_button.setIcon(icon_car_block)
+        car_mode_layout.addWidget(self.place_car_block_button)
+
+        # Add other controls for car mode if needed in the future
+        car_mode_group_box.setLayout(car_mode_layout)
+        layout.addWidget(car_mode_group_box)
+        # --- End Car Mode Tool ---
+
         layout.addStretch() # Pushes content to the top
 
     # --- Add this method ---
@@ -235,7 +275,8 @@ class Sidebar(QFrame):
             self.traffic_jam_button,
             self.rain_area_button,
             self.block_way_button,
-            self.traffic_light_button # Include new button
+            self.traffic_light_button, # Include new button
+            self.place_car_block_button # Include Place Car Block button
         ]
         for button in buttons:
             if button is not sender and button.isChecked():
@@ -270,6 +311,26 @@ class Sidebar(QFrame):
         # This signal tells MapViewer to enter the mode for placing the icon
         self.traffic_light_tool_activated.emit(checked)
         print(f"Traffic Light Tool {'Activated' if checked else 'Deactivated'}")
+
+    def _toggle_car_mode_state(self, checked):
+        """Handles activation/deactivation of the car mode state."""
+        self._car_mode_state_active = checked
+        self.place_car_block_button.setEnabled(checked)
+        if not checked:
+            # If car mode is turned off, also deactivate placing block points
+            if self.place_car_block_button.isChecked():
+                self.place_car_block_button.setChecked(False)
+        # self._uncheck_other_tools(self.toggle_car_mode_button) # Toggle button should not uncheck drawing tools
+        self.car_mode_state_activated.emit(checked) # Emit state change
+        print(f"Car Mode State {'Enabled' if checked else 'Disabled'}")
+
+    def _toggle_place_car_block_drawing_tool(self, checked):
+        """Handles activation/deactivation of the car block point placement tool."""
+        self._place_car_block_drawing_active = checked
+        if checked:
+            self._uncheck_other_tools(self.place_car_block_button)
+        self.place_car_block_drawing_tool_activated.emit(checked)
+        print(f"Place Car Block Point Tool {'Activated' if checked else 'Deactivated'}")
 
     def _update_traffic_weight_from_combo(self, index):
         selected_weight = self.intensity_combo_traffic.currentData()

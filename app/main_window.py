@@ -3,8 +3,9 @@ import os  # Import os
 import numpy as np # Import numpy
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QHBoxLayout, QWidget,
                              QMessageBox, QGraphicsScene, QGraphicsRectItem,
-                             QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsSimpleTextItem) # Add graphics items used
-from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer # Added QTimer
+                             QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsSimpleTextItem,
+                             QGraphicsView) # Add QGraphicsView
+from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer, QLineF # Added QLineF
 from PyQt6.QtGui import QColor, QBrush, QPen, QKeyEvent
 from .map_viewer import MapViewer, EFFECT_DATA_KEY
 from .pathfinding import Pathfinding
@@ -53,6 +54,32 @@ def _segments_intersect(p1: QPointF, q1: QPointF, p2: QPointF, q2: QPointF) -> b
 
     return False # Doesn't intersect
 
+# --- New Geometry Helper: Distance from point to line segment ---
+def point_segment_distance(p: QPointF, a: QPointF, b: QPointF) -> float:
+    """Calculates the shortest distance from point p to line segment ab."""
+    # Vector AB
+    ab_x = b.x() - a.x()
+    ab_y = b.y() - a.y()
+    # Vector AP
+    ap_x = p.x() - a.x()
+    ap_y = p.y() - a.y()
+
+    # Length squared of AB
+    len_sq_ab = ab_x * ab_x + ab_y * ab_y
+    if abs(len_sq_ab) < 1e-9: # A and B are essentially the same point
+        return QLineF(p, a).length()
+
+    # t = dot(AP, AB) / |AB|^2
+    t = (ap_x * ab_x + ap_y * ab_y) / len_sq_ab
+
+    if t < 0: # Closest point on line AB is A
+        closest_point_on_line = a
+    elif t > 1: # Closest point on line AB is B
+        closest_point_on_line = b
+    else: # Projection falls on the segment AB
+        closest_point_on_line = QPointF(a.x() + t * ab_x, a.y() + t * ab_y)
+
+    return QLineF(p, closest_point_on_line).length()
 # --- End Geometry Helper Functions ---
 
 
@@ -95,12 +122,23 @@ class MainWindow(QMainWindow):
         self.end_node = None
         self.node_positions = {}
         if self.pathfinder:
-            self.node_positions = self.pathfinder.get_node_positions()
+            # Extract node positions from the graph
+            for node_id, data in self.pathfinder.graph.nodes(data=True):
+                if 'pos' in data:
+                    self.node_positions[node_id] = data['pos']
             print(f"Loaded {len(self.node_positions)} node positions.")
             # Store original weights for resetting
             # Correctly unpack u, v, data when data=True
-            self._original_weights = {(u, v): data['weight'] for u, v, data in self.pathfinder.graph.edges(data=True)}
-            print(f"Stored original weights for {len(self._original_weights)} edges.")
+            self._original_weights = {}
+            if self.pathfinder.graph.number_of_edges() > 0: # Check if there are edges
+                try:
+                    self._original_weights = {(u, v): data['weight'] for u, v, data in self.pathfinder.graph.edges(data=True) if 'weight' in data}
+                    print(f"Stored original weights for {len(self._original_weights)} edges.")
+                except KeyError as e:
+                    print(f"Warning: Missing 'weight' attribute for an edge: {e}. Original weights might be incomplete.")
+            else:
+                print("Graph has no edges, no original weights to store.")
+
 
         # --- Traffic Light Management ---
         # Store active TrafficLightInstance objects, keyed by icon item's memory address
@@ -113,6 +151,8 @@ class MainWindow(QMainWindow):
         self.sidebar.rain_tool_activated.connect(self.map_viewer.set_rain_drawing_mode)
         self.sidebar.block_way_tool_activated.connect(self.map_viewer.set_block_way_drawing_mode)
         self.sidebar.traffic_light_tool_activated.connect(self.map_viewer.set_traffic_light_placement_mode) # Connect new tool
+        # self.sidebar.car_mode_tool_activated.connect(self.map_viewer.set_car_mode_drawing_mode) # Old connection
+        self.sidebar.place_car_block_drawing_tool_activated.connect(self.map_viewer.set_car_mode_drawing_mode) # Connect new Car Mode drawing signal
 
         # Drawing results / Effect placement
         self.map_viewer.traffic_line_drawn.connect(self.handle_traffic_line)
@@ -121,6 +161,7 @@ class MainWindow(QMainWindow):
         # Connect new traffic light signals
         # self.map_viewer.traffic_light_line_drawn.connect(self.handle_traffic_light_finalized) # Old signal
         self.map_viewer.traffic_light_visuals_created.connect(self.handle_traffic_light_finalized) # New signal - This connection is now correct
+        self.map_viewer.car_block_point_placed.connect(self.handle_car_block_point_placed) # Connect Car Mode click
 
         # Effect removal / changes
         self.map_viewer.effects_changed.connect(self._handle_effects_changed) # Connect effect removal
@@ -224,6 +265,59 @@ class MainWindow(QMainWindow):
 
         # --- Recalculate all effects and path ---
         self._recalculate_effects_and_path()
+
+    # --- Car Mode Handling --- New Method ---
+    def handle_car_block_point_placed(self, click_pos: QPointF):
+        """Handles a click intended to block the nearest edge for car mode."""
+        if not self.pathfinder or not self.node_positions:
+            print("Pathfinder or node positions not available for car block.")
+            return
+
+        min_dist = float('inf')
+        nearest_edge_nodes = None
+        nearest_edge_midpoint = None
+
+        for u, v, data in self.pathfinder.graph.edges(data=True):
+            try:
+                pos_u = QPointF(*self.node_positions[u])
+                pos_v = QPointF(*self.node_positions[v])
+
+                dist = point_segment_distance(click_pos, pos_u, pos_v)
+
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest_edge_nodes = (u, v)
+                    nearest_edge_midpoint = QPointF((pos_u.x() + pos_v.x()) / 2, (pos_u.y() + pos_v.y()) / 2)
+
+            except KeyError:
+                # Should not happen if graph and node_positions are consistent
+                print(f"Warning: Node position missing for edge ({u}-{v}) during car block check.")
+                continue
+
+        if nearest_edge_nodes and nearest_edge_midpoint:
+            u, v = nearest_edge_nodes
+            print(f"Car block placed. Nearest edge: {u}-{v} (distance: {min_dist:.2f}). Blocking it.")
+
+            # Create visual marker at the midpoint of the blocked edge
+            marker_tooltip = f"Edge {u}-{v}"
+            marker_item = self.map_viewer.draw_car_block_marker(nearest_edge_midpoint, marker_tooltip)
+
+            car_block_data = {
+                "type": "car_block",
+                "click_pos": click_pos, # Store original click for reference if needed
+                "blocked_edge_nodes": nearest_edge_nodes,
+                "edge_midpoint": nearest_edge_midpoint # For potential re-drawing or identification
+            }
+            marker_item.setData(EFFECT_DATA_KEY, car_block_data)
+            print(f"Stored data on car block marker: {car_block_data}")
+
+            # Actual graph modification happens in _recalculate_effects_and_path
+            self._recalculate_effects_and_path()
+        else:
+            print("Could not find a nearest edge to block for car mode.")
+            # Optionally, uncheck the button if no edge found, or let user try again
+            # self.sidebar.car_mode_button.setChecked(False)
+
 
     # --- Traffic Light Handling --- Modified Method ---
     def handle_traffic_light_finalized(self, icon_pos: QPointF, line_start: QPointF, line_end: QPointF,
@@ -480,8 +574,41 @@ class MainWindow(QMainWindow):
             else:
                  print(f"  Warning: Item data missing or not type 'traffic_light' for icon id: {icon_id}.")
 
+        # 6. Reapply Car Block effects
+        print(f"Reapplying effects from {len(self.map_viewer.car_block_visuals)} car blocks.")
+        for marker_item in self.map_viewer.car_block_visuals:
+            item_data = marker_item.data(EFFECT_DATA_KEY)
+            if item_data and item_data.get("type") == "car_block":
+                blocked_edge_nodes = item_data.get("blocked_edge_nodes")
+                if blocked_edge_nodes:
+                    u, v = blocked_edge_nodes
+                    edge_blocked_count = 0
+                    if self.pathfinder.graph.has_edge(u, v):
+                        self.pathfinder.graph[u][v]['weight'] = np.inf
+                        edge_blocked_count +=1
+                        print(f"  Re-applied car block (inf weight) to edge ({u}-{v}).")
+                    
+                    # Also block the reverse edge if the graph is directed and the edge exists
+                    if self.pathfinder.graph.is_directed() and self.pathfinder.graph.has_edge(v, u):
+                        self.pathfinder.graph[v][u]['weight'] = np.inf
+                        edge_blocked_count +=1
+                        print(f"  Re-applied car block (inf weight) to reverse edge ({v}-{u}).")
+                    elif not self.pathfinder.graph.is_directed() and not self.pathfinder.graph.has_edge(u,v) and self.pathfinder.graph.has_edge(v,u):
+                        # If undirected, has_edge(u,v) is same as has_edge(v,u)
+                        # This case handles if original (u,v) from data wasn't found but (v,u) was (e.g. undirected graph storage)
+                        # However, for an undirected graph, blocking (u,v) effectively blocks (v,u) already.
+                        # This 'elif' is mostly for completeness but less likely to be distinct from the first 'if' in undirected.
+                        # The primary concern is for DiGraphs.
+                        pass
 
-        # 6. Recalculate and draw path if possible
+
+                    if edge_blocked_count == 0:
+                        print(f"  Warning: Edge ({u}-{v}) or ({v}-{u}) for car block not found during reapplication.")
+                else:
+                    print("  Warning: Missing 'blocked_edge_nodes' data on car block item.")
+
+
+        # 7. Recalculate and draw path if possible
         if self.start_node and self.end_node:
              print("Recalculating path after effects update...")
              self._trigger_pathfinding()
@@ -529,6 +656,9 @@ class MainWindow(QMainWindow):
                  self.sidebar.traffic_light_button.setChecked(False) # This triggers the toggle(false) signal
                  # Explicitly clean up map viewer state as well
                  self.map_viewer.set_traffic_light_placement_mode(False)
+            elif self.sidebar._place_car_block_drawing_active: # Check new state for drawing
+                self.sidebar.place_car_block_button.setChecked(False) # Uncheck the place button
+                # The map_viewer.set_car_mode_drawing_mode(False) should be called by the button's toggle signal
 
 
             # Clean up any temporary visuals in MapViewer
@@ -661,9 +791,27 @@ class MainWindow(QMainWindow):
             # Note: _recalculate_effects_and_path already calls this if effects exist
             # If no effects were added/changed, weights should still be correct (original or last calculated)
 
-            path, cost = self.pathfinder.find_shortest_path(self.start_node, self.end_node)
+            path = self.pathfinder.find_path(self.start_node, self.end_node) # Changed find_shortest_path to find_path
 
             if path:
+                # Assuming find_path returns only the path, calculate cost separately if needed
+                # For now, let's remove the cost variable if find_path doesn't return it.
+                # If find_path is supposed to return cost, the Pathfinding class needs adjustment.
+                # Based on the current Pathfinding class, it only returns the path or None.
+                
+                # Calculate path cost if path is found
+                cost = 0
+                if self.pathfinder.graph and path and len(path) > 1:
+                    for i in range(len(path) - 1):
+                        u, v = path[i], path[i+1]
+                        if self.pathfinder.graph.has_edge(u, v):
+                            cost += self.pathfinder.graph[u][v].get('weight', 0)
+                        else:
+                            # This case should ideally not happen if path is valid
+                            print(f"Warning: Edge {u}-{v} not found in graph while calculating cost.")
+                            cost = float('inf') # Indicate an issue with the path or graph
+                            break
+                
                 print(f"Path found: {path} with cost {cost:.2f}")
                 self.map_viewer.draw_path(path, self.node_positions)
             else:

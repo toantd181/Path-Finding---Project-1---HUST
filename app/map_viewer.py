@@ -41,6 +41,9 @@ class MapViewer(QGraphicsView):
     # Sends: icon_pos, line_start, line_end, icon_item, line_item, text_item
     traffic_light_visuals_created = pyqtSignal(QPointF, QPointF, QPointF, QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsSimpleTextItem) # Correct signal definition
 
+    # --- New Signal for Car Mode ---
+    car_block_point_placed = pyqtSignal(QPointF) # Emitted when user clicks to place a car block
+
     def __init__(self, image_path, on_point_selected, scene=None):
         super().__init__()
         self.scene = scene if scene else QGraphicsScene(self)
@@ -69,6 +72,7 @@ class MapViewer(QGraphicsView):
         # Store tuples: (icon_item, line_item, text_item, data_dict)
         # data_dict will hold durations, state, timer etc. managed by MainWindow
         self.traffic_light_visuals = [] # New list for traffic lights
+        self.car_block_visuals = [] # New list for car block markers
 
         # --- Drawing States ---
         self._is_drawing_traffic = False
@@ -91,6 +95,7 @@ class MapViewer(QGraphicsView):
         self._traffic_light_line_item = None     # Temporary line item while drawing effect line
         self._current_traffic_light_icon_item = None # Temporary icon item shown before line draw
         # --- End Traffic Light State ---
+        self._is_placing_car_block = False # New state for Car Mode
 
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
 
@@ -101,6 +106,7 @@ class MapViewer(QGraphicsView):
         self._is_drawing_block_way = False
         self._is_placing_traffic_light_icon = False # Ensure others are off
         self._is_drawing_traffic_light_line = False
+        self._is_placing_car_block = False # Ensure car mode is off
         if enabled:
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             self.setCursor(Qt.CursorShape.CrossCursor)
@@ -115,6 +121,7 @@ class MapViewer(QGraphicsView):
         self._is_drawing_block_way = False
         self._is_placing_traffic_light_icon = False
         self._is_drawing_traffic_light_line = False
+        self._is_placing_car_block = False # Ensure car mode is off
         if enabled:
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             self.setCursor(Qt.CursorShape.CrossCursor)
@@ -129,6 +136,7 @@ class MapViewer(QGraphicsView):
         self._is_drawing_block_way = enabled
         self._is_placing_traffic_light_icon = False
         self._is_drawing_traffic_light_line = False
+        self._is_placing_car_block = False # Ensure car mode is off
         if enabled:
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             self.setCursor(Qt.CursorShape.CrossCursor)
@@ -144,6 +152,7 @@ class MapViewer(QGraphicsView):
         self._is_drawing_block_way = False
         self._is_placing_traffic_light_icon = enabled
         self._is_drawing_traffic_light_line = False # Not drawing line yet
+        self._is_placing_car_block = False # Ensure car mode is off
         if enabled:
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             # Maybe a specific cursor for placing?
@@ -153,6 +162,23 @@ class MapViewer(QGraphicsView):
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
             self.setCursor(Qt.CursorShape.ArrowCursor)
             self._cleanup_temp_drawing() # Clean up any partial placement
+
+    def set_car_mode_drawing_mode(self, enabled: bool):
+        """Activates mode to place car block points."""
+        self._is_drawing_traffic = False
+        self._is_drawing_rain_area = False
+        self._is_drawing_block_way = False
+        self._is_placing_traffic_light_icon = False
+        self._is_drawing_traffic_light_line = False
+        self._is_placing_car_block = enabled
+        if enabled:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.setCursor(Qt.CursorShape.CrossCursor) # Suggests a 'no entry' or 'block' action
+        else:
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._cleanup_temp_drawing()
+
 
     def _cleanup_temp_drawing(self):
         """Removes temporary drawing items."""
@@ -177,6 +203,7 @@ class MapViewer(QGraphicsView):
         self._block_way_start = None
         self._traffic_light_icon_pos = None
         self._traffic_light_line_start = None
+        # No specific temporary items for car_block_point yet, but good to have the hook.
 
 
     def mousePressEvent(self, event):
@@ -188,40 +215,55 @@ class MapViewer(QGraphicsView):
             item = self.itemAt(event.pos())
             if item:
                 removed = False
+                removed_data = None # Initialize removed_data
                 # Check and remove from traffic jam lines
                 if item in self.traffic_jam_lines:
                     self.scene.removeItem(item)
+                    # removed_data = item.data(EFFECT_DATA_KEY) # If you store data
                     self.traffic_jam_lines.remove(item)
                     removed = True
                 # Check and remove from rain areas
                 elif item in self.rain_area_visuals:
                     self.scene.removeItem(item)
+                    # removed_data = item.data(EFFECT_DATA_KEY) # If you store data
                     self.rain_area_visuals.remove(item)
                     removed = True
                 # Check and remove from block ways
                 elif item in self.block_way_visuals:
                     self.scene.removeItem(item)
+                    # removed_data = item.data(EFFECT_DATA_KEY) # If you store data
                     self.block_way_visuals.remove(item)
                     removed = True
+                # Check and remove from car blocks
+                elif item in self.car_block_visuals: # Unindented this block
+                    self.scene.removeItem(item)
+                    removed_data = item.data(EFFECT_DATA_KEY) # Get data before removing
+                    self.car_block_visuals.remove(item)
+                    # Store data on the item being clicked for MainWindow to identify
+                    if removed_data is not None: # Ensure data exists before setting
+                        item.setData(EFFECT_DATA_KEY, removed_data) # Re-set for MainWindow to pick up
+                    removed = True
                 # Check and remove from traffic lights (remove icon, line, and text)
-                else:
-                    for i, (icon_item, line_item, text_item, _) in enumerate(self.traffic_light_visuals):
+                else: # This else now correctly corresponds to the above checks
+                    for i, (icon_item, line_item, text_item, data) in enumerate(self.traffic_light_visuals):
                         # Check if clicked item is any part of the traffic light visual group
                         if item == icon_item or item == line_item or item == text_item:
                             self.scene.removeItem(icon_item)
                             self.scene.removeItem(line_item)
                             self.scene.removeItem(text_item) # Remove text item as well
-                            # MainWindow needs to know which specific light was removed
-                            # We can pass the item's data back or handle timer stop in MainWindow based on item removal
-                            removed_data = self.traffic_light_visuals.pop(i)[3] # Get data before removing (index 3 now)
+                            
+                            removed_visual_tuple = self.traffic_light_visuals.pop(i)
+                            removed_data = removed_visual_tuple[3] # Get data from the tuple
+
                             # Store data on the item being clicked for MainWindow to identify
                             if isinstance(item, (QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsSimpleTextItem)):
                                 item.setData(EFFECT_DATA_KEY, removed_data)
                             removed = True
                             break # Found and removed
+  
 
                 if removed:
-                    print(f"Removed effect item at {pos}")
+                    print(f"Removed effect item at {pos}. Data: {removed_data}")
                     self.effects_changed.emit() # Signal that effects need recalculation
                     event.accept()
                     return # Don't process further
@@ -276,6 +318,14 @@ class MapViewer(QGraphicsView):
             self._block_way_line_item = QGraphicsLineItem(QLineF(pos, pos))
             self._block_way_line_item.setPen(pen)
             self.scene.addItem(self._block_way_line_item)
+            event.accept()
+        elif self._is_placing_car_block:
+            # User clicked to place a car block point
+            print(f"Car block point clicked at {pos}")
+            self.car_block_point_placed.emit(pos) # MainWindow will handle logic
+            # No temporary visual here, MainWindow will instruct to draw permanent one
+            # The button remains checked until MainWindow confirms and potentially unchecks it
+            # or user presses Esc or selects another tool.
             event.accept()
         else:
             # Normal mode: Select start/end point or pan
@@ -572,6 +622,20 @@ class MapViewer(QGraphicsView):
             text_item.setBrush(QBrush(text_color))
 
 
+    # --- Car Block Visuals --- New Methods ---
+    def draw_car_block_marker(self, pos: QPointF, edge_data_for_tooltip: str = "Blocked Edge"):
+        """Draws a marker for a blocked edge (car block)."""
+        # Example: A small red 'X' or a circle
+        radius = 4
+        marker = QGraphicsEllipseItem(pos.x() - radius, pos.y() - radius, 2 * radius, 2 * radius)
+        marker.setBrush(QBrush(QColor("darkred")))
+        marker.setPen(QPen(QColor("black"), 1))
+        marker.setToolTip(f"Car Block: {edge_data_for_tooltip}")
+        marker.setZValue(2) # Ensure it's visible
+        self.scene.addItem(marker)
+        self.car_block_visuals.append(marker)
+        return marker
+
     # --- Clearing Methods ---
     def clear_path(self):
         for item in self.path_items:
@@ -605,12 +669,21 @@ class MapViewer(QGraphicsView):
         self.traffic_light_visuals.clear()
         # Note: Timers associated with these need to be stopped in MainWindow
 
+    def clear_car_blocks(self):
+        """Clears all car block markers."""
+        for item in self.car_block_visuals:
+            if item and item.scene() == self.scene:
+                self.scene.removeItem(item)
+        self.car_block_visuals.clear()
+
+
     def clear_all_effects(self):
         """Clears all types of effects."""
         self.clear_traffic_jams()
         self.clear_rain_areas()
         self.clear_block_ways()
         self.clear_traffic_lights()
+        self.clear_car_blocks() # Add to clear all
         self.effects_changed.emit() # Signal recalculation after clearing all
 
     # --- Path Drawing ---
