@@ -1,9 +1,9 @@
 import os
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QFrame, QRadioButton,
                              QButtonGroup, QGroupBox, QPushButton, QComboBox,
-                             QSpinBox, QHBoxLayout, QFormLayout) # Added QSpinBox, QHBoxLayout, QFormLayout
-from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtGui import QIcon
+                             QSpinBox, QHBoxLayout, QFormLayout, QLineEdit, QCompleter) # Added QLineEdit, QCompleter
+from PyQt6.QtCore import pyqtSignal, Qt, QStringListModel # Added Qt, QStringListModel
+from PyQt6.QtGui import QIcon # Added QIcon
 from .custom_widgets import FindPathButton
 from .tools.traffic import TrafficTool
 from .tools.rain import RainTool
@@ -24,6 +24,13 @@ class Sidebar(QFrame):
     car_mode_state_activated = pyqtSignal(bool) # Renamed signal for Car Mode state
     # Signal for place car block point drawing tool activation
     place_car_block_drawing_tool_activated = pyqtSignal(bool) # New signal for placing block points
+
+    # Signals for location search
+    location_selected_for_start = pyqtSignal(object) # Emits the full location data object
+    location_selected_for_end = pyqtSignal(object)   # Emits the full location data object
+    use_map_start_clicked = pyqtSignal()
+    use_map_end_clicked = pyqtSignal()
+
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -50,7 +57,56 @@ class Sidebar(QFrame):
         title_label = QLabel("Tools")
         layout.addWidget(title_label)
 
-        # Add Start and End point labels
+        # --- Location Search ---
+        search_group_box = QGroupBox("Location Search")
+        search_layout = QFormLayout()
+
+        self.from_location_combo = QComboBox()
+        self.from_location_combo.setEditable(True)
+        self.from_location_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.from_location_combo.lineEdit().setPlaceholderText("Type or select 'From' location")
+        self.from_location_completer_model = QStringListModel(self)
+        self.from_location_completer = QCompleter(self.from_location_completer_model, self)
+        self.from_location_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.from_location_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.from_location_combo.setCompleter(self.from_location_completer)
+        # Connect activated signal (when user selects an item from dropdown or hits Enter)
+        self.from_location_combo.activated.connect(self._on_from_location_selected)
+
+
+        self.use_map_start_button = QPushButton("Use Map Start")
+        self.use_map_start_button.clicked.connect(self._on_use_map_start_clicked)
+
+        from_widgets_layout = QHBoxLayout()
+        from_widgets_layout.addWidget(self.from_location_combo, 1)
+        from_widgets_layout.addWidget(self.use_map_start_button)
+        search_layout.addRow(QLabel("From:"), from_widgets_layout)
+
+        self.to_location_combo = QComboBox()
+        self.to_location_combo.setEditable(True)
+        self.to_location_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.to_location_combo.lineEdit().setPlaceholderText("Type or select 'To' location")
+        self.to_location_completer_model = QStringListModel(self) # Separate model for 'To'
+        self.to_location_completer = QCompleter(self.to_location_completer_model, self)
+        self.to_location_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.to_location_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.to_location_combo.setCompleter(self.to_location_completer)
+        self.to_location_combo.activated.connect(self._on_to_location_selected)
+
+        self.use_map_end_button = QPushButton("Use Map End")
+        self.use_map_end_button.clicked.connect(self._on_use_map_end_clicked)
+
+        to_widgets_layout = QHBoxLayout()
+        to_widgets_layout.addWidget(self.to_location_combo, 1)
+        to_widgets_layout.addWidget(self.use_map_end_button)
+        search_layout.addRow(QLabel("To:"), to_widgets_layout)
+
+        search_group_box.setLayout(search_layout)
+        layout.addWidget(search_group_box)
+        
+        self.all_locations_data = [] # To store the full data for locations for easy lookup
+
+        # Add Start and End point labels (moved after search for better flow)
         self.start_label = QLabel("Start: Not Selected")
         layout.addWidget(self.start_label)
 
@@ -268,6 +324,60 @@ class Sidebar(QFrame):
             TrafficLightState.GREEN: self.duration_spinbox_green.value()
         }
     # --- End of added method ---
+
+    def _on_from_location_selected(self, index):
+        # This signal is emitted when an item is chosen from the completer list or typed and enter pressed
+        if index >= 0 and index < self.from_location_combo.count():
+            location_data = self.from_location_combo.itemData(index)
+            if location_data: # Make sure data is valid
+                self.location_selected_for_start.emit(location_data)
+
+    def _on_to_location_selected(self, index):
+        if index >= 0 and index < self.to_location_combo.count():
+            location_data = self.to_location_combo.itemData(index)
+            if location_data:
+                self.location_selected_for_end.emit(location_data)
+
+    def _on_use_map_start_clicked(self):
+        self.use_map_start_clicked.emit()
+        # Optionally clear the combo box text, MainWindow will update it if start_node exists
+        # self.from_location_combo.lineEdit().setText("") 
+        # self.from_location_combo.setCurrentIndex(-1)
+
+
+    def _on_use_map_end_clicked(self):
+        self.use_map_end_clicked.emit()
+        # self.to_location_combo.lineEdit().setText("")
+        # self.to_location_combo.setCurrentIndex(-1)
+
+    def populate_location_search(self, locations_data):
+        """
+        Populates the 'From' and 'To' QComboBoxes with searchable locations.
+        locations_data is a list of dicts from Pathfinding.get_all_searchable_locations().
+        """
+        self.all_locations_data = locations_data 
+        
+        display_names = [loc['display_name'] for loc in locations_data]
+        
+        self.from_location_completer_model.setStringList(display_names)
+        self.to_location_completer_model.setStringList(display_names)
+
+        # Populate ComboBoxes with display names and store full data object
+        self.from_location_combo.blockSignals(True)
+        self.to_location_combo.blockSignals(True)
+
+        self.from_location_combo.clear()
+        self.to_location_combo.clear()
+
+        for loc_data in locations_data:
+            self.from_location_combo.addItem(loc_data['display_name'], userData=loc_data)
+            self.to_location_combo.addItem(loc_data['display_name'], userData=loc_data)
+        
+        self.from_location_combo.setCurrentIndex(-1) # No initial selection
+        self.to_location_combo.setCurrentIndex(-1)
+
+        self.from_location_combo.blockSignals(False)
+        self.to_location_combo.blockSignals(False)
 
     def _uncheck_other_tools(self, sender):
         """Unchecks other tool buttons when one is activated."""

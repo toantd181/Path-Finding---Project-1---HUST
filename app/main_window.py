@@ -111,7 +111,7 @@ class MainWindow(QMainWindow):
         db_file = os.path.join(os.path.dirname(__file__), "data", "graph.db")
         self.pathfinder = None
         try:
-            self.pathfinder = Pathfinding(db_file)
+            self.pathfinder = Pathfinding(db_file) # Pathfinding now stores db_path
             print("Pathfinding engine initialized.")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to initialize pathfinding: {e}")
@@ -138,6 +138,8 @@ class MainWindow(QMainWindow):
                     print(f"Warning: Missing 'weight' attribute for an edge: {e}. Original weights might be incomplete.")
             else:
                 print("Graph has no edges, no original weights to store.")
+            
+            self._initialize_search_tool() # Call after pathfinder and node_positions are ready
 
 
         # --- Traffic Light Management ---
@@ -165,6 +167,194 @@ class MainWindow(QMainWindow):
 
         # Effect removal / changes
         self.map_viewer.effects_changed.connect(self._handle_effects_changed) # Connect effect removal
+
+        # Connect search signals
+        self.sidebar.location_selected_for_start.connect(self._handle_location_selected_for_start)
+        self.sidebar.location_selected_for_end.connect(self._handle_location_selected_for_end)
+        self.sidebar.use_map_start_clicked.connect(self._handle_use_map_start_clicked)
+        self.sidebar.use_map_end_clicked.connect(self._handle_use_map_end_clicked)
+
+
+    def _initialize_search_tool(self):
+        if not self.pathfinder:
+            print("Search tool not initialized: Pathfinding engine not available.")
+            return
+        
+        locations_data = self.pathfinder.get_all_searchable_locations()
+        if locations_data:
+            self.sidebar.populate_location_search(locations_data)
+            print(f"Search tool populated with {len(locations_data)} locations.")
+        else:
+            print("Search tool: No locations found to populate.")
+
+    def _set_start_node_from_data(self, location_data):
+        """Helper to set start node from location data (node or special place)."""
+        node_id_to_set = None
+        position_to_set = None # This will be a tuple (x,y)
+        display_name_for_label = location_data['display_name'].split(' (')[0] # Get name before "(Node)" or "(Place)"
+
+        if location_data['type'] == 'node':
+            node_id_to_set = location_data['id'] # id is the node name
+            if node_id_to_set in self.node_positions:
+                position_to_set = self.node_positions[node_id_to_set]
+            else:
+                QMessageBox.warning(self, "Error", f"Node '{node_id_to_set}' from search not found in map data.")
+                print(f"Error: Node {node_id_to_set} from search not in node_positions.")
+                return False
+        elif location_data['type'] == 'special_place':
+            sp_x, sp_y = location_data['pos']
+            # Find the nearest graph node to this special place's coordinates
+            node_id_to_set = self._find_nearest_node(sp_x, sp_y)
+            if node_id_to_set and node_id_to_set in self.node_positions:
+                position_to_set = self.node_positions[node_id_to_set]
+                # Label should show special place name, but indicate the snapped node
+                display_name_for_label = f"{location_data['name']} (near Node {node_id_to_set})"
+            else:
+                QMessageBox.warning(self, "Error", f"Could not find a nearby map node for special place '{location_data['name']}'.")
+                print(f"Error: Could not find nearest node for special place {location_data['name']} or its position.")
+                return False
+        else:
+            print(f"Unknown location type: {location_data['type']}")
+            return False
+
+        if node_id_to_set and position_to_set:
+            if node_id_to_set == self.end_node:
+                QMessageBox.warning(self, "Selection Error", "Start location cannot be the same as the end location.")
+                self.sidebar.from_location_combo.setCurrentIndex(-1) # Clear invalid selection
+                self.sidebar.from_location_combo.lineEdit().setText("")
+                return False
+
+            self.start_node = node_id_to_set
+            snapped_pos = QPointF(position_to_set[0], position_to_set[1])
+            self.sidebar.start_label.setText(f"Start: {display_name_for_label}")
+            self.map_viewer.set_permanent_point("start", snapped_pos)
+            print(f"Start node set to {self.start_node} via search: {location_data['display_name']}")
+            return True
+        return False
+
+    def _set_end_node_from_data(self, location_data):
+        """Helper to set end node from location data."""
+        node_id_to_set = None
+        position_to_set = None
+        display_name_for_label = location_data['display_name'].split(' (')[0]
+
+        if location_data['type'] == 'node':
+            node_id_to_set = location_data['id']
+            if node_id_to_set in self.node_positions:
+                position_to_set = self.node_positions[node_id_to_set]
+            else:
+                QMessageBox.warning(self, "Error", f"Node '{node_id_to_set}' from search not found in map data.")
+                print(f"Error: Node {node_id_to_set} from search not in node_positions.")
+                return False
+        elif location_data['type'] == 'special_place':
+            sp_x, sp_y = location_data['pos']
+            node_id_to_set = self._find_nearest_node(sp_x, sp_y)
+            if node_id_to_set and node_id_to_set in self.node_positions:
+                position_to_set = self.node_positions[node_id_to_set]
+                display_name_for_label = f"{location_data['name']} (near Node {node_id_to_set})"
+            else:
+                QMessageBox.warning(self, "Error", f"Could not find a nearby map node for special place '{location_data['name']}'.")
+                print(f"Error: Could not find nearest node for special place {location_data['name']} or its position.")
+                return False
+        else:
+            print(f"Unknown location type: {location_data['type']}")
+            return False
+
+        if node_id_to_set and position_to_set:
+            if node_id_to_set == self.start_node:
+                QMessageBox.warning(self, "Selection Error", "End location cannot be the same as the start location.")
+                self.sidebar.to_location_combo.setCurrentIndex(-1) # Clear invalid selection
+                self.sidebar.to_location_combo.lineEdit().setText("")
+                return False
+
+            self.end_node = node_id_to_set
+            snapped_pos = QPointF(position_to_set[0], position_to_set[1])
+            self.sidebar.end_label.setText(f"End: {display_name_for_label}")
+            self.map_viewer.set_permanent_point("end", snapped_pos)
+            print(f"End node set to {self.end_node} via search: {location_data['display_name']}")
+            return True
+        return False
+
+    def _handle_location_selected_for_start(self, location_data):
+        if self._set_start_node_from_data(location_data):
+            if self.start_node and self.end_node:
+                self._trigger_pathfinding()
+            else:
+                self.map_viewer.clear_path() # Clear path if only one point is set/changed
+
+    def _handle_location_selected_for_end(self, location_data):
+        if self._set_end_node_from_data(location_data):
+            if self.start_node and self.end_node:
+                self._trigger_pathfinding()
+            else:
+                self.map_viewer.clear_path()
+
+    def _handle_use_map_start_clicked(self):
+        if self.start_node and self.start_node in self.node_positions:
+            self.sidebar.start_label.setText(f"Start: Node {self.start_node} (Map)")
+            # Update the combo box to show this, but don't select an item from its list
+            self.sidebar.from_location_combo.lineEdit().setText(f"Node {self.start_node} (Map Selection)")
+            self.sidebar.from_location_combo.setCurrentIndex(-1) # Ensure no item is actually selected in dropdown
+            print(f"Used current map start point: Node {self.start_node}")
+        else:
+            QMessageBox.information(self, "Info", "No start point selected on the map to use.")
+            self.sidebar.start_label.setText("Start: Not Selected")
+            self.sidebar.from_location_combo.lineEdit().setText("")
+            self.sidebar.from_location_combo.setCurrentIndex(-1)
+
+    def _handle_use_map_end_clicked(self):
+        if self.end_node and self.end_node in self.node_positions:
+            self.sidebar.end_label.setText(f"End: Node {self.end_node} (Map)")
+            self.sidebar.to_location_combo.lineEdit().setText(f"Node {self.end_node} (Map Selection)")
+            self.sidebar.to_location_combo.setCurrentIndex(-1)
+            print(f"Used current map end point: Node {self.end_node}")
+        else:
+            QMessageBox.information(self, "Info", "No end point selected on the map to use.")
+            self.sidebar.end_label.setText("End: Not Selected")
+            self.sidebar.to_location_combo.lineEdit().setText("")
+            self.sidebar.to_location_combo.setCurrentIndex(-1)
+
+    def _update_combo_text_for_map_selection(self, point_type_str, node_id):
+        """Updates the corresponding QComboBox text when a point is selected/deselected on the map."""
+        combo = None
+        label_widget = None
+        label_prefix = ""
+
+        if point_type_str == "start":
+            combo = self.sidebar.from_location_combo
+            label_widget = self.sidebar.start_label
+            label_prefix = "Start: "
+        elif point_type_str == "end":
+            combo = self.sidebar.to_location_combo
+            label_widget = self.sidebar.end_label
+            label_prefix = "End: "
+        
+        if combo:
+            if node_id is None: # Point cleared
+                combo.setCurrentIndex(-1)
+                combo.lineEdit().setText("")
+                if label_widget: label_widget.setText(f"{label_prefix}Not Selected")
+            else:
+                # Try to find if this node_id matches an existing item in the combo's model
+                found_idx = -1
+                item_display_text = f"Node {node_id} (Map Selection)" # Default text
+                for i in range(combo.count()): # Iterate through items in ComboBox
+                    item_data = combo.itemData(i)
+                    # Check if the item_data corresponds to the selected node_id
+                    if item_data and item_data.get('type') == 'node' and item_data.get('id') == node_id:
+                        found_idx = i
+                        item_display_text = item_data.get('display_name', item_display_text)
+                        break
+                    # If node_id was derived from a special place, we can't easily reverse map to its display_name here
+                    # So, we'll just show "Node X (Map Selection)" or the direct node name if found.
+                
+                if found_idx != -1:
+                    combo.setCurrentIndex(found_idx) # This will also update the lineEdit text
+                    if label_widget: label_widget.setText(f"{label_prefix}{item_display_text.split(' (')[0]}")
+                else: # If not found as a pre-populated item (e.g. pure node click)
+                    combo.lineEdit().setText(item_display_text)
+                    combo.setCurrentIndex(-1) # Ensure no dropdown item is selected if text is custom
+                    if label_widget: label_widget.setText(f"{label_prefix}Node {node_id} (Map)")
 
 
     def _handle_effects_changed(self):
@@ -690,19 +880,18 @@ class MainWindow(QMainWindow):
 
     def _handle_point_selected(self, point_type, x, y):
         """Handles clicks on the map for selecting start/end points."""
-        # If point_type is None, it means a click happened, find nearest node.
-        # If point_type is "start" or "end", it might be a direct call (less likely now)
+        # Store previous start/end to see if they changed for combo box updates
+        prev_start_node = self.start_node
+        prev_end_node = self.end_node
+
         if x == -1 and y == -1: # Special case indicating a point was cleared in MapViewer
-             if self.start_node and not self.map_viewer._permanent_start_item:
-                 self.start_node = None
-                 self.sidebar.start_label.setText("Start: Not Selected")
-                 print("Start point cleared.")
-             if self.end_node and not self.map_viewer._permanent_end_item:
-                 self.end_node = None
-                 self.sidebar.end_label.setText("End: Not Selected")
-                 print("End point cleared.")
-             # Path is cleared in MapViewer's handler, recalculation not needed unless effects exist
-             # self._recalculate_effects_and_path() # Recalc might be needed if effects depend on start/end later
+             # This typically means a point was cleared programmatically or by specific action
+             # not covered by clicking on the marker itself (which is handled below)
+             if self.start_node is None and prev_start_node is not None: # Start point became None
+                 self._update_combo_text_for_map_selection("start", None)
+             if self.end_node is None and prev_end_node is not None: # End point became None
+                 self._update_combo_text_for_map_selection("end", None)
+             # Path clearing is handled by the caller or subsequent logic
              return
 
 
@@ -720,7 +909,7 @@ class MainWindow(QMainWindow):
             # Set or reset start point
             if self.start_node == nearest_node: # Clicked on existing start node
                  self.start_node = None
-                 self.sidebar.start_label.setText("Start: Not Selected")
+                 # self.sidebar.start_label.setText("Start: Not Selected") # Updated by _update_combo_text
                  self.map_viewer.clear_permanent_point("start")
                  print(f"Start node {nearest_node} deselected.")
             elif nearest_node == self.end_node: # Clicked on end node while start is empty
@@ -729,7 +918,7 @@ class MainWindow(QMainWindow):
                  return
             else:
                  self.start_node = nearest_node
-                 self.sidebar.start_label.setText(f"Start: Node {nearest_node}")
+                 # self.sidebar.start_label.setText(f"Start: Node {nearest_node}") # Updated by _update_combo_text
                  self.map_viewer.set_permanent_point("start", snapped_pos)
                  print(f"Start node set to {nearest_node} at ({snapped_pos.x():.1f}, {snapped_pos.y():.1f})")
 
@@ -737,17 +926,12 @@ class MainWindow(QMainWindow):
              # Set or reset end point
              if self.end_node == nearest_node: # Clicked on existing end node
                  self.end_node = None
-                 self.sidebar.end_label.setText("End: Not Selected")
+                 # self.sidebar.end_label.setText("End: Not Selected") # Updated by _update_combo_text
                  self.map_viewer.clear_permanent_point("end")
                  print(f"End node {nearest_node} deselected.")
-             # Cannot set end node to the same as start node (already checked by start_node == nearest_node above)
-             # elif nearest_node == self.start_node: # Redundant check
-             #     print("Cannot set end node to the same as start node.")
-             #     self.map_viewer.clear_temporary_point()
-             #     return
-             else:
+             else: # Cannot set end node to the same as start node (already checked by start_node == nearest_node above)
                  self.end_node = nearest_node
-                 self.sidebar.end_label.setText(f"End: Node {nearest_node}")
+                 # self.sidebar.end_label.setText(f"End: Node {nearest_node}") # Updated by _update_combo_text
                  self.map_viewer.set_permanent_point("end", snapped_pos)
                  print(f"End node set to {nearest_node} at ({snapped_pos.x():.1f}, {snapped_pos.y():.1f})")
         else:
@@ -759,10 +943,15 @@ class MainWindow(QMainWindow):
                  return
              else: # Set new start node
                  self.start_node = nearest_node
-                 self.sidebar.start_label.setText(f"Start: Node {nearest_node}")
+                 # self.sidebar.start_label.setText(f"Start: Node {nearest_node}") # Updated by _update_combo_text
                  self.map_viewer.set_permanent_point("start", snapped_pos)
                  print(f"Start node changed to {nearest_node} at ({snapped_pos.x():.1f}, {snapped_pos.y():.1f})")
 
+        # Update combo box text and labels if nodes changed
+        if self.start_node != prev_start_node:
+            self._update_combo_text_for_map_selection("start", self.start_node)
+        if self.end_node != prev_end_node:
+            self._update_combo_text_for_map_selection("end", self.end_node)
 
         # Clear the temporary click marker now that we've handled the selection
         self.map_viewer.clear_temporary_point()
