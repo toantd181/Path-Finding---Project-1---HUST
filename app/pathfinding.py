@@ -102,7 +102,7 @@ class Pathfinding:
                  print(f"Warning: Invalid position data for nodes {u} or {v}")
                  return float('inf')
 
-            return ((pos_u[0] - pos_v[0])**2 + (pos_u[1] - pos_v[1])**2)**0.5
+            return ((pos_u[0] - pos_v[0])**2 + (pos_u[1] - pos_v[1])**2)**0.5 / 100
 
         try:
             # Check if start and end nodes exist in the graph
