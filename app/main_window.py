@@ -121,6 +121,7 @@ class MainWindow(QMainWindow):
         self.start_node = None
         self.end_node = None
         self.node_positions = {}
+        self._effect_application_threshold = 15 # Default threshold in pixels, adjust as needed
         if self.pathfinder:
             # Extract node positions from the graph
             for node_id, data in self.pathfinder.graph.nodes(data=True):
@@ -370,7 +371,8 @@ class MainWindow(QMainWindow):
         # Iterate over a copy of the keys since we might modify the dictionary
         for icon_id in list(self._active_traffic_lights.keys()):
             if icon_id not in active_icon_ids:
-                instance, text_item = self._active_traffic_lights[icon_id]
+                # Correctly unpack all four items, using _ for unused ones here
+                instance, text_item, _, _ = self._active_traffic_lights[icon_id]
                 print(f"Stopping timer for removed traffic light (icon id: {icon_id})")
                 instance.stop()
                 # No need to manually remove text_item, MapViewer handles visual removal
@@ -510,8 +512,7 @@ class MainWindow(QMainWindow):
 
 
     # --- Traffic Light Handling --- Modified Method ---
-    def handle_traffic_light_finalized(self, icon_pos: QPointF, line_start: QPointF, line_end: QPointF,
-                                       icon_item: QGraphicsPixmapItem, line_item: QGraphicsLineItem, text_item: QGraphicsSimpleTextItem):
+    def handle_traffic_light_finalized(self, icon_pos, line_start, line_end, icon_item, line_item, text_item):
         """Handles the finalized placement of a traffic light (icon + line + text)."""
         if not self.pathfinder: return
 
@@ -550,7 +551,7 @@ class MainWindow(QMainWindow):
 
         # Store the active instance and text_item, keyed by icon item's ID
         icon_id = id(icon_item)
-        self._active_traffic_lights[icon_id] = (traffic_light_instance, text_item)
+        self._active_traffic_lights[icon_id] = (traffic_light_instance, text_item, icon_item, line_item)
         print(f"Stored data and started timer for traffic light (icon id: {icon_id})")
 
         # Update the visual state immediately (e.g., tooltip, initial countdown, text color)
@@ -562,34 +563,31 @@ class MainWindow(QMainWindow):
 
 
     def _traffic_light_state_updated(self):
-        """Slot called when a TrafficLightInstance changes state."""
-        sender_instance = self.sender()
-        if not isinstance(sender_instance, TrafficLightInstance): return
+        print(f"DEBUG: MainWindow._traffic_light_state_updated called by: {self.sender()}") # DEBUG
+        traffic_light_instance = self.sender()
+        if traffic_light_instance and isinstance(traffic_light_instance, TrafficLightInstance):
+            print(f"DEBUG: MainWindow: Signal from TrafficLightInstance. New state: {traffic_light_instance.current_state}") # DEBUG
 
-        print(f"Traffic light state changed to: {sender_instance.current_state}. Recalculating...")
+            # Find the corresponding visual icon and text item to update appearance/tooltip
+            found_icon_item = None
+            found_text_item = None
+            # The value in _active_traffic_lights is (instance, text_item, icon_item, line_item)
+            # Unpack all four items. Use _ for items not immediately needed if any.
+            for _icon_id, (instance_from_dict, text_item_from_dict, icon_item_from_dict, _line_item_from_dict) in self._active_traffic_lights.items():
+                 if instance_from_dict == traffic_light_instance:
+                     found_icon_item = icon_item_from_dict
+                     found_text_item = text_item_from_dict
+                     break
+            # The previous inner loop searching self.map_viewer.traffic_light_visuals to find
+            # icon_item using icon_id is no longer necessary as icon_item_from_dict is directly available.
 
-        # Find the corresponding visual icon and text item to update appearance/tooltip
-        found_icon_item = None
-        found_text_item = None
-        for icon_id, (instance, text_item) in self._active_traffic_lights.items():
-             if instance == sender_instance:
-                 # Need to find the icon_item corresponding to this icon_id
-                 # Iterate through MapViewer's visuals (tuple structure: icon, line, text, data)
-                 for ic, _, tx, _ in self.map_viewer.traffic_light_visuals:
-                     if id(ic) == icon_id:
-                         found_icon_item = ic
-                         # Use the text_item directly associated with the instance in our dict
-                         found_text_item = text_item
-                         break
-                 break
-
-        if found_icon_item and found_text_item:
-             # Update tooltip AND text color
-             self.map_viewer.update_traffic_light_visual_state(found_icon_item, found_text_item, sender_instance.current_state) # Pass text_item
-             # Update countdown immediately on state change as well
-             self.map_viewer.update_traffic_light_countdown(found_text_item, sender_instance.get_remaining_time())
-        else:
-             print("Warning: Could not find visual item for updated traffic light instance.")
+            if found_icon_item and found_text_item:
+                 # Update tooltip AND text color
+                 self.map_viewer.update_traffic_light_visual_state(found_icon_item, found_text_item, traffic_light_instance.current_state) # Pass text_item
+                 # Update countdown immediately on state change as well
+                 self.map_viewer.update_traffic_light_countdown(found_text_item, traffic_light_instance.get_remaining_time())
+            else:
+                 print("Warning: Could not find visual item for updated traffic light instance.")
 
 
         # Recalculate paths since weights have changed
@@ -602,7 +600,8 @@ class MainWindow(QMainWindow):
 
         # Find the text item associated with this instance
         found_text_item = None
-        for instance, text_item in self._active_traffic_lights.values():
+        # Unpack all four items, using _ for items not directly used in this loop's logic
+        for instance, text_item, _, _ in self._active_traffic_lights.values():
             if instance == sender_instance:
                 found_text_item = text_item
                 break
@@ -615,195 +614,115 @@ class MainWindow(QMainWindow):
 
     # --- Recalculation Logic ---
     def _recalculate_effects_and_path(self):
-        """Resets weights and reapplies effects from all current visuals, including dynamic traffic lights."""
-        print("Recalculating all effects...")
-        if not self.pathfinder or not self._original_weights:
-            print("  Skipping recalculation: Pathfinding not ready or original weights missing.")
+        if not self.pathfinder or not self.pathfinder.graph: # Ensure graph exists
+            print("DEBUG: MainWindow: Pathfinder or graph not available for recalculation.")
             return
 
-        # 1. Reset all weights to original values
-        self.reset_graph_weights() # This now only resets weights, timers handled separately
+        print("DEBUG: MainWindow: Entering _recalculate_effects_and_path.")
+        self.reset_graph_weights() # CRITICAL: Ensure this is called first
 
-        # --- Apply Static Effects First ---
+        # --- Define a specific edge to trace for debugging ---
+        debug_edge_u = None # "node_A" # Set to an actual node name to trace
+        debug_edge_v = None # "node_B" # Set to an actual node name to trace
 
-        # 2. Reapply traffic jam effects
-        print(f"Reapplying effects from {len(self.map_viewer.traffic_jam_lines)} traffic lines.")
+        if debug_edge_u and debug_edge_v and self.pathfinder.graph.has_edge(debug_edge_u, debug_edge_v):
+            print(f"DEBUG TRACE ({debug_edge_u}-{debug_edge_v}): Weight AFTER reset_graph_weights: {self.pathfinder.graph[debug_edge_u][debug_edge_v].get('weight')}")
+        elif debug_edge_u and debug_edge_v:
+            print(f"DEBUG TRACE: Edge ({debug_edge_u}-{debug_edge_v}) not found in graph for tracing after reset.")
+
+
+        # --- Apply Traffic Jam Effects ---
         for line_item in self.map_viewer.traffic_jam_lines:
-            item_data = line_item.data(EFFECT_DATA_KEY)
-            if item_data and item_data.get("type") == "traffic":
-                weight_increase = item_data.get("weight", 0)
-                effect_start = item_data.get("start")
-                effect_end = item_data.get("end")
-                if effect_start and effect_end:
-                    affected_count = 0
-                    # Iterate over a copy of edges
-                    for u, v in list(self.pathfinder.graph.edges()):
-                        if not self.pathfinder.graph.has_edge(u,v): continue
-                        try:
-                            pos_u = QPointF(*self.node_positions[u])
-                            pos_v = QPointF(*self.node_positions[v])
-                            if _segments_intersect(effect_start, effect_end, pos_u, pos_v):
-                                current_weight = self.pathfinder.graph[u][v].get('weight', 0)
-                                if current_weight != np.inf:
-                                    self.pathfinder.graph[u][v]['weight'] = max(0, current_weight + weight_increase) # Ensure non-negative
-                                    affected_count += 1
-                        except KeyError as e:
-                            print(f"  Warning: Node position not found for {e} while reapplying traffic.")
-                        except Exception as e:
-                            print(f"  Error processing edge ({u}, {v}) for traffic reapplication: {e}")
-                    if affected_count > 0: print(f"  Applied traffic weight +{weight_increase} to {affected_count} intersecting edges.")
-                else:
-                    print("  Warning: Missing data on traffic line item.")
+            data = line_item.data(EFFECT_DATA_KEY)
+            if data and data.get("type") == "traffic":
+                p1 = data["start"]
+                p2 = data["end"]
+                weight_increase = data["weight"]
+                affected_edges = self.pathfinder.find_edges_near_line(p1, p2, self._effect_application_threshold)
+                for u, v in affected_edges:
+                    self.pathfinder.modify_edge_weight(u, v, add_weight=weight_increase)
+                    if debug_edge_u and debug_edge_v and (u,v) == (debug_edge_u, debug_edge_v):
+                        print(f"DEBUG TRACE ({debug_edge_u}-{debug_edge_v}): Weight AFTER traffic jam: {self.pathfinder.graph[u][v].get('weight')}")
 
-        # 3. Reapply rain effects
-        print(f"Reapplying effects from {len(self.map_viewer.rain_area_visuals)} rain areas.")
-        for area_item in self.map_viewer.rain_area_visuals:
-            item_data = area_item.data(EFFECT_DATA_KEY)
-            if item_data and item_data.get("type") == "rain":
-                weight_increase = item_data.get("weight", 0)
-                area_rect = item_data.get("rect")
-                if area_rect:
-                    affected_count = 0
-                    for u, v in list(self.pathfinder.graph.edges()):
-                        if not self.pathfinder.graph.has_edge(u,v): continue
-                        try:
-                            pos_u = self.node_positions[u]
-                            pos_v = self.node_positions[v]
-                            mid_x = (pos_u[0] + pos_v[0]) / 2
-                            mid_y = (pos_u[1] + pos_v[1]) / 2
-                            edge_midpoint = QPointF(mid_x, mid_y)
-                            if area_rect.contains(edge_midpoint):
-                                current_weight = self.pathfinder.graph[u][v].get('weight', 0)
-                                if current_weight != np.inf:
-                                    self.pathfinder.graph[u][v]['weight'] = max(0, current_weight + weight_increase)
-                                    affected_count += 1
-                        except KeyError as e:
-                             print(f"  Warning: Node position not found for {e} while reapplying rain.")
-                        except Exception as e:
-                             print(f"  Error processing edge ({u}, {v}) for rain reapplication: {e}")
-                    if affected_count > 0: print(f"  Applied rain weight +{weight_increase} to {affected_count} edges in area.")
-                else:
-                    print("  Warning: Missing data on rain area item.")
+        # --- Apply Rain Area Effects ---
+        for rect_item in self.map_viewer.rain_area_visuals:
+            data = rect_item.data(EFFECT_DATA_KEY)
+            if data and data.get("type") == "rain":
+                rect = data["rect"]
+                weight_increase = data["weight"]
+                affected_edges = []
+                for u_edge, v_edge in self.pathfinder.graph.edges():
+                    pos_u_tuple = self.node_positions.get(u_edge)
+                    pos_v_tuple = self.node_positions.get(v_edge)
+                    if pos_u_tuple and pos_v_tuple:
+                        edge_mid_x = (pos_u_tuple[0] + pos_v_tuple[0]) / 2
+                        edge_mid_y = (pos_u_tuple[1] + pos_v_tuple[1]) / 2
+                        if rect.contains(QPointF(edge_mid_x, edge_mid_y)):
+                            affected_edges.append((u_edge, v_edge))
+                for u, v in affected_edges:
+                    self.pathfinder.modify_edge_weight(u, v, add_weight=weight_increase)
+                    if debug_edge_u and debug_edge_v and (u,v) == (debug_edge_u, debug_edge_v):
+                        print(f"DEBUG TRACE ({debug_edge_u}-{debug_edge_v}): Weight AFTER rain: {self.pathfinder.graph[u][v].get('weight')}")
 
-        # 4. Reapply block way effects
-        print(f"Reapplying effects from {len(self.map_viewer.block_way_visuals)} block way lines.")
-        for block_item in self.map_viewer.block_way_visuals:
-            item_data = block_item.data(EFFECT_DATA_KEY)
-            if item_data and item_data.get("type") == "block_way":
-                block_start = item_data.get("start")
-                block_end = item_data.get("end")
-                if block_start and block_end:
-                    affected_count = 0
-                    for u, v in list(self.pathfinder.graph.edges()):
-                        if not self.pathfinder.graph.has_edge(u,v): continue
-                        try:
-                            pos_u = QPointF(*self.node_positions[u])
-                            pos_v = QPointF(*self.node_positions[v])
-                            if _segments_intersect(block_start, block_end, pos_u, pos_v):
-                                self.pathfinder.graph[u][v]['weight'] = np.inf
-                                affected_count += 1
-                                # Block reverse edge too if it exists and graph is directed
-                                # if self.pathfinder.graph.is_directed() and self.pathfinder.graph.has_edge(v, u):
-                                #      self.pathfinder.graph[v][u]['weight'] = np.inf
-                        except KeyError as e:
-                             print(f"  Warning: Node position not found for {e} while reapplying block way.")
-                        except Exception as e:
-                             print(f"  Error processing edge ({u}, {v}) for block way reapplication: {e}")
-                    if affected_count > 0: print(f"  Applied block (inf weight) to {affected_count} intersecting edges.")
-                else:
-                    print("  Warning: Missing data on block way item.")
+        # --- Apply Block Way Effects ---
+        for line_item in self.map_viewer.block_way_visuals:
+            data = line_item.data(EFFECT_DATA_KEY)
+            if data and data.get("type") == "block_way":
+                p1 = data["start"]
+                p2 = data["end"]
+                affected_edges = self.pathfinder.find_edges_near_line(p1, p2, self._effect_application_threshold)
+                for u, v in affected_edges:
+                    self.pathfinder.modify_edge_weight(u, v, set_weight=float('inf'))
+                    if debug_edge_u and debug_edge_v and (u,v) == (debug_edge_u, debug_edge_v):
+                        print(f"DEBUG TRACE ({debug_edge_u}-{debug_edge_v}): Weight AFTER block_way: {self.pathfinder.graph[u][v].get('weight')}")
+        
+        # --- Apply Car Block Effects ---
+        for marker_item in self.map_viewer.car_block_visuals:
+            data = marker_item.data(EFFECT_DATA_KEY)
+            if data and data.get("type") == "car_block":
+                u, v = data["blocked_edge_nodes"]
+                self.pathfinder.modify_edge_weight(u, v, set_weight=float('inf'))
+                if debug_edge_u and debug_edge_v and (u,v) == (debug_edge_u, debug_edge_v):
+                     print(f"DEBUG TRACE ({debug_edge_u}-{debug_edge_v}): Weight AFTER car_block: {self.pathfinder.graph[u][v].get('weight')}")
 
-        # --- Apply Dynamic Traffic Light Effects ---
 
-        # 5. Reapply traffic light effects based on current state
-        print(f"Reapplying effects from {len(self.map_viewer.traffic_light_visuals)} traffic lights.")
-        # Iterate using the MapViewer's list as the source of truth for visuals
-        # Tuple structure: (icon_item, line_item, text_item, data_dict)
-        for icon_item, line_item, text_item, item_data in self.map_viewer.traffic_light_visuals:
-            # Find the corresponding instance from our active dictionary using icon_id
-            icon_id = id(icon_item)
-            instance_tuple = self._active_traffic_lights.get(icon_id)
-
-            if not instance_tuple:
-                print(f"  Warning: No active instance found for traffic light icon id {icon_id}. Skipping.")
+        # --- Apply Traffic Light Effects ---
+        print(f"DEBUG: MainWindow: Processing {len(self._active_traffic_lights)} active traffic lights for recalculation.")
+        for icon_id, (traffic_light_instance, text_item, icon_item, line_item) in self._active_traffic_lights.items():
+            if not traffic_light_instance:
                 continue
 
-            instance, _ = instance_tuple # We only need the instance here
-            # item_data is already retrieved from the loop
+            current_tl_state = traffic_light_instance.current_state
+            weight_modifier = traffic_light_instance.get_current_weight_modifier()
 
-            if item_data and item_data.get("type") == "traffic_light":
-                # instance = item_data.get("instance") # Already got instance from dict
-                effect_start = item_data.get("line_start")
-                effect_end = item_data.get("line_end")
+            # Get the effect line from the QGraphicsLineItem associated with this traffic light
+            effect_qlinef = line_item.line()
+            p1 = effect_qlinef.p1()
+            p2 = effect_qlinef.p2()
+            
+            affected_edges_for_tl = self.pathfinder.find_edges_near_line(p1, p2, threshold=self._effect_application_threshold)
 
-                if instance and effect_start and effect_end:
-                    # Get the CURRENT weight modifier from the instance's state
-                    weight_modifier = instance.get_current_weight_modifier()
-                    current_state_name = instance.current_state
+            if debug_edge_u and debug_edge_v and (debug_edge_u, debug_edge_v) in affected_edges_for_tl:
+                print(f"DEBUG TRACE ({debug_edge_u}-{debug_edge_v}): Traffic light {icon_id} (State: {current_tl_state}) is affecting this edge.")
+                print(f"DEBUG TRACE ({debug_edge_u}-{debug_edge_v}): Weight BEFORE this TL mod: {self.pathfinder.graph[debug_edge_u][debug_edge_v].get('weight')}")
+                print(f"DEBUG TRACE ({debug_edge_u}-{debug_edge_v}): TL Modifier to ADD: {weight_modifier}")
 
-                    affected_count = 0
-                    for u, v in list(self.pathfinder.graph.edges()):
-                        if not self.pathfinder.graph.has_edge(u,v): continue
-                        try:
-                            pos_u = QPointF(*self.node_positions[u])
-                            pos_v = QPointF(*self.node_positions[v])
-                            # Check intersection with the traffic light's effect line
-                            if _segments_intersect(effect_start, effect_end, pos_u, pos_v):
-                                current_weight = self.pathfinder.graph[u][v].get('weight', 0)
-                                if current_weight != np.inf: # Don't modify blocked roads
-                                    # Apply the modifier based on the light's current state
-                                    self.pathfinder.graph[u][v]['weight'] = max(0, current_weight + weight_modifier)
-                                    affected_count += 1
-                        except KeyError as e:
-                             print(f"  Warning: Node position not found for {e} while reapplying traffic light.")
-                        except Exception as e:
-                             print(f"  Error processing edge ({u}, {v}) for traffic light reapplication: {e}")
-                    if affected_count > 0: print(f"  Applied traffic light ({current_state_name}) weight mod +{weight_modifier:.1f} to {affected_count} intersecting edges.")
-                else:
-                    print(f"  Warning: Missing data or instance on traffic light item (icon id: {icon_id}).")
-            else:
-                 print(f"  Warning: Item data missing or not type 'traffic_light' for icon id: {icon_id}.")
+            for u_edge, v_edge in affected_edges_for_tl:
+                if self.pathfinder.graph.has_edge(u_edge,v_edge):
+                    self.pathfinder.modify_edge_weight(u_edge, v_edge, add_weight=weight_modifier)
 
-        # 6. Reapply Car Block effects
-        print(f"Reapplying effects from {len(self.map_viewer.car_block_visuals)} car blocks.")
-        for marker_item in self.map_viewer.car_block_visuals:
-            item_data = marker_item.data(EFFECT_DATA_KEY)
-            if item_data and item_data.get("type") == "car_block":
-                blocked_edge_nodes = item_data.get("blocked_edge_nodes")
-                if blocked_edge_nodes:
-                    u, v = blocked_edge_nodes
-                    edge_blocked_count = 0
-                    if self.pathfinder.graph.has_edge(u, v):
-                        self.pathfinder.graph[u][v]['weight'] = np.inf
-                        edge_blocked_count +=1
-                        print(f"  Re-applied car block (inf weight) to edge ({u}-{v}).")
-                    
-                    # Also block the reverse edge if the graph is directed and the edge exists
-                    if self.pathfinder.graph.is_directed() and self.pathfinder.graph.has_edge(v, u):
-                        self.pathfinder.graph[v][u]['weight'] = np.inf
-                        edge_blocked_count +=1
-                        print(f"  Re-applied car block (inf weight) to reverse edge ({v}-{u}).")
-                    elif not self.pathfinder.graph.is_directed() and not self.pathfinder.graph.has_edge(u,v) and self.pathfinder.graph.has_edge(v,u):
-                        # If undirected, has_edge(u,v) is same as has_edge(v,u)
-                        # This case handles if original (u,v) from data wasn't found but (v,u) was (e.g. undirected graph storage)
-                        # However, for an undirected graph, blocking (u,v) effectively blocks (v,u) already.
-                        # This 'elif' is mostly for completeness but less likely to be distinct from the first 'if' in undirected.
-                        # The primary concern is for DiGraphs.
-                        pass
+            if debug_edge_u and debug_edge_v and (debug_edge_u, debug_edge_v) in affected_edges_for_tl:
+                 print(f"DEBUG TRACE ({debug_edge_u}-{debug_edge_v}): Weight AFTER this TL mod: {self.pathfinder.graph[debug_edge_u][debug_edge_v].get('weight')}")
 
 
-                    if edge_blocked_count == 0:
-                        print(f"  Warning: Edge ({u}-{v}) or ({v}-{u}) for car block not found during reapplication.")
-                else:
-                    print("  Warning: Missing 'blocked_edge_nodes' data on car block item.")
-
-
-        # 7. Recalculate and draw path if possible
+        # --- Recalculate path if start and end points are set ---
         if self.start_node and self.end_node:
-             print("Recalculating path after effects update...")
-             self._trigger_pathfinding()
+            print(f"DEBUG: MainWindow: Start ({self.start_node}) and End ({self.end_node}) nodes are set. Calling _trigger_pathfinding after all effects.")
+            self._trigger_pathfinding()
         else:
-             self.map_viewer.clear_path() # Clear path if no start/end
+            print("DEBUG: MainWindow: Start or End node not set. Pathfinding not triggered after recalculation.")
+            self.map_viewer.clear_path()
+        print("DEBUG: MainWindow: Exiting _recalculate_effects_and_path.")
 
     def reset_graph_weights(self):
         """Resets graph edge weights to their original values."""
@@ -823,10 +742,11 @@ class MainWindow(QMainWindow):
     def stop_all_traffic_light_timers(self):
         """Stops all active traffic light timers."""
         print("Stopping all traffic light timers...")
-        # Iterate through a copy of values because stopping might trigger signals? (unlikely but safer)
-        for instance, text_item in list(self._active_traffic_lights.values()):
-            instance.stop()
-        self._active_traffic_lights.clear() # Clear the active instances dictionary
+        for data_tuple in list(self._active_traffic_lights.values()):
+            tl_instance = data_tuple[0] # The first element is the TrafficLightInstance
+            if tl_instance: 
+                tl_instance.stop()
+        self._active_traffic_lights.clear() 
         print("All traffic light timers stopped and instances cleared.")
 
 
@@ -975,24 +895,21 @@ class MainWindow(QMainWindow):
             return
 
         print(f"Finding path from {self.start_node} to {self.end_node}...")
+        print(f"DEBUG: MainWindow: In _trigger_pathfinding from {self.start_node} to {self.end_node}.") # DEBUG
         try:
-            # Ensure weights are up-to-date before finding path
-            # Note: _recalculate_effects_and_path already calls this if effects exist
-            # If no effects were added/changed, weights should still be correct (original or last calculated)
+            # path_nodes, total_cost = self.pathfinder.find_path(self.start_node, self.end_node) # Old problematic line
+            path_nodes = self.pathfinder.find_path(self.start_node, self.end_node) # Corrected line
 
-            path = self.pathfinder.find_path(self.start_node, self.end_node) # Changed find_shortest_path to find_path
-
-            if path:
-                # Assuming find_path returns only the path, calculate cost separately if needed
-                # For now, let's remove the cost variable if find_path doesn't return it.
-                # If find_path is supposed to return cost, the Pathfinding class needs adjustment.
-                # Based on the current Pathfinding class, it only returns the path or None.
+            if path_nodes:
+                # The 'total_cost' variable from the unpacking is no longer available here.
+                # The cost is calculated below.
+                # print(f"DEBUG: MainWindow: Path found: {path_nodes}, Cost: {total_cost}. Drawing path.") # DEBUG # Old debug print
                 
                 # Calculate path cost if path is found
-                cost = 0
-                if self.pathfinder.graph and path and len(path) > 1:
-                    for i in range(len(path) - 1):
-                        u, v = path[i], path[i+1]
+                cost = 0.0 # Initialize cost as float
+                if self.pathfinder.graph and len(path_nodes) > 1: # path_nodes is already confirmed to be truthy
+                    for i in range(len(path_nodes) - 1):
+                        u, v = path_nodes[i], path_nodes[i+1]
                         if self.pathfinder.graph.has_edge(u, v):
                             cost += self.pathfinder.graph[u][v].get('weight', 0)
                         else:
@@ -1000,14 +917,17 @@ class MainWindow(QMainWindow):
                             print(f"Warning: Edge {u}-{v} not found in graph while calculating cost.")
                             cost = float('inf') # Indicate an issue with the path or graph
                             break
+                # If path_nodes has 0 or 1 node (e.g. start=end), cost remains 0.0, which is correct.
                 
-                print(f"Path found: {path} with cost {cost:.2f}")
-                self.map_viewer.draw_path(path, self.node_positions)
+                print(f"DEBUG: MainWindow: Path found: {path_nodes}, Calculated Cost: {cost:.2f}. Drawing path.") # Updated debug print using calculated cost
+                
+                print(f"Path found: {path_nodes} with cost {cost:.2f}")
+                self.map_viewer.draw_path(path_nodes, self.node_positions)
             else:
+                print("DEBUG: MainWindow: Path not found by pathfinder in _trigger_pathfinding.") # DEBUG
                 print("No path found.")
                 QMessageBox.information(self, "Pathfinding", f"No path found between node {self.start_node} and {self.end_node}.")
                 self.map_viewer.clear_path()
-
         except Exception as e:
             print(f"Error during pathfinding: {e}")
             QMessageBox.critical(self, "Pathfinding Error", f"An error occurred: {e}")

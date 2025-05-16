@@ -1,7 +1,7 @@
 import sqlite3
 import networkx as nx
 import os
-
+from PyQt6.QtCore import QPointF, QLineF # Add this import
 
 class Pathfinding:
     def __init__(self, graph_db_path):
@@ -178,5 +178,97 @@ class Pathfinding:
             if conn:
                 conn.close()
         return locations
+
+    # --- Add the new methods below ---
+
+    def find_edges_near_line(self, line_p1: QPointF, line_p2: QPointF, threshold: float):
+        """
+        Finds graph edges whose midpoints are within a given threshold distance
+        from the line segment defined by line_p1 and line_p2.
+        """
+        affected_edges = []
+        if not self.graph:
+            return affected_edges
+
+        for u, v in self.graph.edges():
+            try:
+                pos_u_tuple = self.graph.nodes[u]['pos']
+                pos_v_tuple = self.graph.nodes[v]['pos']
+
+                # Midpoint of the graph edge
+                edge_mid_x = (pos_u_tuple[0] + pos_v_tuple[0]) / 2
+                edge_mid_y = (pos_u_tuple[1] + pos_v_tuple[1]) / 2
+                edge_midpoint = QPointF(edge_mid_x, edge_mid_y)
+
+                # Calculate distance from edge_midpoint to the line_p1-line_p2 segment
+                # (Using logic similar to point_segment_distance from main_window.py)
+                
+                # Vector from line_p1 to line_p2
+                line_vec_x = line_p2.x() - line_p1.x()
+                line_vec_y = line_p2.y() - line_p1.y()
+
+                # Vector from line_p1 to edge_midpoint
+                point_vec_x = edge_midpoint.x() - line_p1.x()
+                point_vec_y = edge_midpoint.y() - line_p1.y()
+
+                len_sq_line = line_vec_x * line_vec_x + line_vec_y * line_vec_y
+                
+                dist = float('inf')
+                if abs(len_sq_line) < 1e-9: # line_p1 and line_p2 are effectively the same point
+                    dist = QLineF(edge_midpoint, line_p1).length()
+                else:
+                    # Project point_vec onto line_vec
+                    t = (point_vec_x * line_vec_x + point_vec_y * line_vec_y) / len_sq_line
+                    
+                    closest_point_on_line = QPointF()
+                    if t < 0.0: # Projection is beyond line_p1
+                        closest_point_on_line = line_p1
+                    elif t > 1.0: # Projection is beyond line_p2
+                        closest_point_on_line = line_p2
+                    else: # Projection is on the segment
+                        closest_point_on_line = QPointF(line_p1.x() + t * line_vec_x, 
+                                                        line_p1.y() + t * line_vec_y)
+                    dist = QLineF(edge_midpoint, closest_point_on_line).length()
+
+                if dist < threshold:
+                    affected_edges.append((u, v))
+            except KeyError:
+                # This can happen if a node in an edge doesn't have 'pos' data.
+                # load_graph_from_db should prevent this, but good to be safe.
+                # print(f"Warning: Position data missing for edge ({u}-{v}) in find_edges_near_line.")
+                continue
+            except Exception as e:
+                # print(f"Warning: Error processing edge ({u}-{v}) in find_edges_near_line: {e}")
+                continue
+            
+        return affected_edges
+
+    def modify_edge_weight(self, u, v, add_weight=None, set_weight=None):
+        """Modifies the weight of an edge (u,v) in the graph."""
+        if not self.graph.has_edge(u, v):
+            # print(f"Warning: Edge ({u}-{v}) not found in graph. Cannot modify weight.")
+            return
+
+        if add_weight is not None:
+            current_weight = self.graph[u][v].get('weight', 0.0) # Default to 0.0 if no weight
+            # Ensure current_weight is a number
+            if not isinstance(current_weight, (int, float)):
+                current_weight = 0.0
+            self.graph[u][v]['weight'] = current_weight + add_weight
+            # print(f"DEBUG Pathfinding: Edge ({u}-{v}) weight changed from {current_weight:.2f} to {self.graph[u][v]['weight']:.2f} (added {add_weight:.2f})")
+        elif set_weight is not None:
+            # old_weight = self.graph[u][v].get('weight', "N/A")
+            self.graph[u][v]['weight'] = set_weight
+            # print(f"DEBUG Pathfinding: Edge ({u}-{v}) weight set from {old_weight} to {set_weight:.2f}")
+        # else:
+            # print(f"Warning: modify_edge_weight called for ({u}-{v}) without add_weight or set_weight.")
+
+    # The _recalculate_effects_and_path method below was likely a copy-paste error
+    # from main_window.py and should NOT be part of the Pathfinding class.
+    # Remove it if it's present in your app/pathfinding.py file.
+    # def _recalculate_effects_and_path(self):
+    #    ... (this method belongs in MainWindow) ...
+
+
 
 

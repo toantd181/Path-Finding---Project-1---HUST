@@ -32,15 +32,16 @@ class TrafficLightInstance(QObject):
         self._emit_remaining_time() # Emit initial time immediately
 
     def get_current_weight_modifier(self):
-        """Calculates the weight modifier based on the current state and duration."""
-        duration = self.durations.get(self.current_state, 0)
+        """Calculates the weight modifier based on the current state."""
+        # Ensure these penalties are significantly different and make sense
+        # relative to your graph's original edge weights.
         if self.current_state == TrafficLightState.RED:
-            return 50 + duration * 2 # Example: Base penalty + scaled duration
+            return 10000.0  # Very high penalty
         elif self.current_state == TrafficLightState.YELLOW:
-            return 100 + duration * 10 # Example
+            return 500.0   # Moderate penalty
         elif self.current_state == TrafficLightState.GREEN:
-            return 10 + duration * 0.5 # Example: Small penalty even for green
-        return 0
+            return 1.0     # Very low or zero penalty
+        return 5000.0 # Default penalty for unknown state (should not happen)
 
     def get_remaining_time(self):
         """Calculates the remaining time in the current state in seconds."""
@@ -63,6 +64,7 @@ class TrafficLightInstance(QObject):
 
     def _update_state(self):
         """Transitions to the next state and restarts the timer."""
+        old_state = self.current_state # For debugging
         if self.current_state == TrafficLightState.RED:
             self.current_state = TrafficLightState.GREEN
         elif self.current_state == TrafficLightState.GREEN:
@@ -71,6 +73,8 @@ class TrafficLightInstance(QObject):
             self.current_state = TrafficLightState.RED
         else: # Should not happen
             self.current_state = TrafficLightState.RED
+
+        print(f"DEBUG: TrafficLightInstance ID {id(self)}: State changed from {old_state} to {self.current_state}. Emitting state_changed.") # DEBUG
 
         # state_start_time is reset in _schedule_next_update
         self._schedule_next_update()
