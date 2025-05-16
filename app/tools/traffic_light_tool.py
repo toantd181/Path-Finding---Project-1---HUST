@@ -32,16 +32,37 @@ class TrafficLightInstance(QObject):
         self._emit_remaining_time() # Emit initial time immediately
 
     def get_current_weight_modifier(self):
-        """Calculates the weight modifier based on the current state."""
-        # Ensure these penalties are significantly different and make sense
-        # relative to your graph's original edge weights.
+        """
+        Calculates the weight modifier based on the current state and its remaining time.
+        The penalty is proportional to the remaining time, scaled by a state-specific rate.
+        """
+        # Define penalty rates (penalty units per second of remaining time).
+        # These rates determine the penalty's sensitivity to remaining time for each state.
+        # Example rates (can be tuned):
+        # - If a typical red light (e.g., 30s) should have a max penalty around 100, rate = 100/30 = 3.33
+        # - If a typical yellow light (e.g., 5s) should have a max penalty around 50, rate = 50/5 = 10.0
+        # - If a typical green light (e.g., 25s) should have a max penalty around 1, rate = 1/25 = 0.04
+        penalty_rate = 0.0
         if self.current_state == TrafficLightState.RED:
-            return 10000.0  # Very high penalty
+            penalty_rate = 3.33  # Penalty units per second of red light remaining
         elif self.current_state == TrafficLightState.YELLOW:
-            return 500.0   # Moderate penalty
+            penalty_rate = 10.0  # Penalty units per second of yellow light remaining
         elif self.current_state == TrafficLightState.GREEN:
-            return 1.0     # Very low or zero penalty
-        return 5000.0 # Default penalty for unknown state (should not happen)
+            # Green light usually has a very low penalty or could even be a bonus (negative rate).
+            # For a small penalty that decreases with time:
+            penalty_rate = 0.04  # Penalty units per second of green light remaining
+        else:
+            # Default penalty for unknown state (should ideally not happen)
+            return 150.0
+
+        remaining_time_s = self.get_remaining_time() # Integer, >= 0
+
+        # If remaining_time_s is 0 (e.g., state ended or duration is 0/invalid in get_remaining_time),
+        # the penalty will correctly be 0.
+        
+        modified_penalty = penalty_rate * remaining_time_s
+        
+        return modified_penalty
 
     def get_remaining_time(self):
         """Calculates the remaining time in the current state in seconds."""
