@@ -3,6 +3,36 @@ import networkx as nx
 import os
 from PyQt6.QtCore import QPointF, QLineF # Add this import
 
+def point_segment_distance(p: QPointF, a: QPointF, b: QPointF) -> (float, QPointF):
+    """
+    Calculates the shortest distance from point p to line segment ab.
+    Returns: (distance, closest_point_on_segment)
+    """
+    ab_x = b.x() - a.x()
+    ab_y = b.y() - a.y()
+    ap_x = p.x() - a.x()
+    ap_y = p.y() - a.y()
+
+    len_sq_ab = ab_x * ab_x + ab_y * ab_y
+    if abs(len_sq_ab) < 1e-9:
+        # a and b are the same point
+        dist = QLineF(p, a).length()
+        return dist, a
+
+    t = (ap_x * ab_x + ap_y * ab_y) / len_sq_ab
+    
+    if t < 0.0:
+        t = 0.0
+        closest_point_on_line = a
+    elif t > 1.0:
+        t = 1.0
+        closest_point_on_line = b
+    else:
+        closest_point_on_line = QPointF(a.x() + t * ab_x, a.y() + t * ab_y)
+        
+    dist = QLineF(p, closest_point_on_line).length()
+    return dist, closest_point_on_line
+
 class Pathfinding:
     def __init__(self, graph_db_path):
         self.graph = nx.DiGraph()
@@ -10,6 +40,7 @@ class Pathfinding:
         if not os.path.exists(self.db_path):
             raise FileNotFoundError(f"Database file not found: {self.db_path}")
         self.load_graph_from_db(self.db_path)
+        self._temp_changes = [] # <<< ADD THIS LINE
 
     def load_graph_from_db(self, db_path):
         """Loads graph data from an SQLite database, ensuring data integrity for positions."""
@@ -259,16 +290,143 @@ class Pathfinding:
         elif set_weight is not None:
             # old_weight = self.graph[u][v].get('weight', "N/A")
             self.graph[u][v]['weight'] = set_weight
-            # print(f"DEBUG Pathfinding: Edge ({u}-{v}) weight set from {old_weight} to {set_weight:.2f}")
-        # else:
-            # print(f"Warning: modify_edge_weight called for ({u}-{v}) without add_weight or set_weight.")
 
-    # The _recalculate_effects_and_path method below was likely a copy-paste error
-    # from main_window.py and should NOT be part of the Pathfinding class.
-    # Remove it if it's present in your app/pathfinding.py file.
-    # def _recalculate_effects_and_path(self):
-    #    ... (this method belongs in MainWindow) ...
+    def add_virtual_node(self, click_x: float, click_y: float, preferred_id: str) -> (str, tuple):
+        """
+        Finds the nearest edge, splits it, and adds a temporary virtual node.
+        Returns: (new_node_id, (actual_x, actual_y))
+        """
+        
+        click_point = QPointF(click_x, click_y)
+        
+        # 1. Find the nearest edge in the graph
+        min_dist = float('inf')
+        best_edge = None
+        closest_point_on_edge = None
+        
+        for u, v in self.graph.edges():
+            pos_u_tuple = self.graph.nodes[u].get('pos')
+            pos_v_tuple = self.graph.nodes[v].get('pos')
 
+            if not pos_u_tuple or not pos_v_tuple:
+                continue # Skip edges with missing node data
 
+            pos_u = QPointF(*pos_u_tuple)
+            pos_v = QPointF(*pos_v_tuple)
+            
+            dist, closest_point = point_segment_distance(click_point, pos_u, pos_v)
+            
+            if dist < min_dist:
+                min_dist = dist
+                best_edge = (u, v)
+                closest_point_on_edge = closest_point
+
+        # 2. Fallback: If no edge is found (e.g., empty graph)
+        if best_edge is None:
+            print("Warning: No best edge found. Finding nearest node as fallback.")
+            nearest_node_id = None
+            min_node_dist = float('inf')
+            
+            for node_id, data in self.graph.nodes(data=True):
+                pos_tuple = data.get('pos')
+                if not pos_tuple:
+                    continue
+                
+                node_dist = QLineF(click_point, QPointF(*pos_tuple)).length()
+                if node_dist < min_node_dist:
+                    min_node_dist = node_dist
+                    nearest_node_id = node_id
+            
+            if nearest_node_id:
+                new_node_id = preferred_id
+                actual_pos = (click_x, click_y) # Use exact click pos
+                
+                self.graph.add_node(new_node_id, pos=actual_pos)
+                weight = min_node_dist # Weight = distance
+                
+                # Add edges in both directions for simplicity
+                self.graph.add_edge(new_node_id, nearest_node_id, weight=weight)
+                self.graph.add_edge(nearest_node_id, new_node_id, weight=weight)
+                
+                self._temp_changes.append(('node', new_node_id))
+                self._temp_changes.append(('edge', (new_node_id, nearest_node_id)))
+                self._temp_changes.append(('edge', (nearest_node_id, new_node_id)))
+                
+                return new_node_id, actual_pos
+            else:
+                return None, None # Complete failure
+
+        # 3. We found a best edge. Split it.
+        u, v = best_edge
+        new_node_id = preferred_id
+        actual_pos = (closest_point_on_edge.x(), closest_point_on_edge.y())
+        
+        # 4. Store original edge data, remove it, add new node
+        original_edge_data = self.graph.get_edge_data(u, v).copy()
+        self._temp_changes.append(('edge_split', (u, v, original_edge_data)))
+        
+        self.graph.remove_edge(u, v)
+        self.graph.add_node(new_node_id, pos=actual_pos)
+        
+        # 5. Calculate new weights (proportional to distance)
+        original_weight = original_edge_data.get('weight', 0)
+        pos_u = QPointF(*self.graph.nodes[u]['pos'])
+        pos_v = QPointF(*self.graph.nodes[v]['pos'])
+        
+        dist_u_v = QLineF(pos_u, pos_v).length()
+        dist_u_new = QLineF(pos_u, closest_point_on_edge).length()
+        dist_new_v = QLineF(closest_point_on_edge, pos_v).length()
+        
+        weight_u_new = 0
+        weight_new_v = 0
+        
+        if abs(dist_u_v) > 1e-9:
+            weight_u_new = original_weight * (dist_u_new / dist_u_v)
+            weight_new_v = original_weight * (dist_new_v / dist_u_v)
+        
+        # 6. Add the two new split edges
+        self.graph.add_edge(u, new_node_id, weight=weight_u_new)
+        self.graph.add_edge(new_node_id, v, weight=weight_new_v)
+        
+        # 7. Store changes for cleanup
+        self._temp_changes.append(('node', new_node_id))
+        self._temp_changes.append(('edge', (u, new_node_id)))
+        self._temp_changes.append(('edge', (new_node_id, v)))
+        
+        return new_node_id, actual_pos
+
+    def remove_virtual_nodes(self):
+        """
+        Restores the graph to its original state by undoing temp changes.
+        """
+        if not self._temp_changes:
+            return
+            
+        print(f"Cleaning up {len(self._temp_changes)} temporary graph changes.")
+        
+        # Iterate in reverse to re-add edges before removing nodes
+        for change_type, data in reversed(self._temp_changes):
+            try:
+                if change_type == 'node':
+                    # data is node_id
+                    if self.graph.has_node(data):
+                        self.graph.remove_node(data)
+                
+                elif change_type == 'edge':
+                    # data is (u, v)
+                    if self.graph.has_edge(*data):
+                        self.graph.remove_edge(*data)
+                
+                elif change_type == 'edge_split':
+                    # data is (u, v, original_edge_data)
+                    u, v, original_data = data
+                    # Add original edge back
+                    if not self.graph.has_edge(u, v):
+                        self.graph.add_edge(u, v, **original_data)
+            except Exception as e:
+                print(f"Error during graph cleanup: {e}")
+
+        # Clear the changes list
+        self._temp_changes = []
 
 

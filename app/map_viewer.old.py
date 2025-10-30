@@ -46,7 +46,7 @@ class MapViewer(QGraphicsView):
         self._permanent_end_item = None
         self._temporary_point_item = None
         self.path_items = []
-        self.waypoint_markers = []
+        self.waypoint_markers = []  # Store waypoint visual markers
 
         # Effect Visuals Storage
         self.traffic_jam_lines = []
@@ -75,6 +75,8 @@ class MapViewer(QGraphicsView):
         self._is_selecting_waypoint = False
 
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        
+        # Improve interaction
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
 
@@ -94,6 +96,7 @@ class MapViewer(QGraphicsView):
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
             self.setCursor(Qt.CursorShape.ArrowCursor)
 
+    # Drawing Mode Setters
     def set_start_selection_mode(self, enabled: bool):
         """Set mode for selecting start point"""
         self._is_selecting_start = enabled
@@ -209,45 +212,22 @@ class MapViewer(QGraphicsView):
                 event.accept()
                 return
 
-        # Handle point selection modes FIRST (waypoint/start/end)
-        if self._is_selecting_waypoint:
-            print(f"DEBUG: Waypoint mode active - handling selection")
-            self._handle_point_selection(event, pos)
-            return
-        
-        if self._is_selecting_start:
-            print(f"DEBUG: Start mode active - handling selection")
-            self._handle_point_selection(event, pos)
-            return
-            
-        if self._is_selecting_end:
-            print(f"DEBUG: End mode active - handling selection")
-            self._handle_point_selection(event, pos)
-            return
-        
         # Handle drawing modes
         if self._is_placing_traffic_light_icon:
             self._handle_traffic_light_icon_placement(pos)
             event.accept()
-            return
-            
-        if self._is_drawing_traffic_light_line:
+        elif self._is_drawing_traffic_light_line:
             self._start_traffic_light_line_drawing(pos)
             event.accept()
-            return
-            
-        if self._is_drawing_traffic:
+        elif self._is_drawing_traffic:
             self._start_traffic_line_drawing(pos)
             event.accept()
-            return
-            
-        if self._is_drawing_block_way:
+        elif self._is_drawing_block_way:
             self._start_block_way_drawing(pos)
             event.accept()
-            return
-        
-        # Normal mode
-        self._handle_point_selection(event, pos)
+        else:
+            # Normal mode: Select start/end point
+            self._handle_point_selection(event, pos)
 
     def _remove_effect_at_item(self, item):
         """Remove effect at the given item. Returns True if something was removed."""
@@ -263,6 +243,7 @@ class MapViewer(QGraphicsView):
             self.block_way_visuals.remove(item)
             removed = True
         else:
+            # Check traffic lights
             for i, (icon_item, line_item, text_item, data) in enumerate(self.traffic_light_visuals):
                 if item in (icon_item, line_item, text_item):
                     self.scene.removeItem(icon_item)
@@ -315,34 +296,28 @@ class MapViewer(QGraphicsView):
         self.scene.addItem(self._block_way_line_item)
 
     def _handle_point_selection(self, event, pos):
-        """Handle point selection for start/end/waypoint"""
+        """Handle point selection for start/end"""
+        # First check if clicking on existing markers
         item = self.itemAt(event.pos())
         
         if item == self._permanent_start_item or item == self._permanent_end_item:
+            # Don't allow clicking markers in selection mode - use clear buttons instead
             self.clear_temporary_point()
             event.accept()
             return
 
-        # Show temporary feedback and call callback
+        # Show temporary feedback
         if self._is_selecting_start:
-            print("DEBUG: Drawing green preview for start")
             self.draw_point(pos, QColor("lightgreen"), radius=8, temporary=True)
             self.on_point_selected("start", pos.x(), pos.y())
-            event.accept()
         elif self._is_selecting_end:
-            print("DEBUG: Drawing blue preview for end")
             self.draw_point(pos, QColor("lightblue"), radius=8, temporary=True)
             self.on_point_selected("end", pos.x(), pos.y())
-            event.accept()
-        elif self._is_selecting_waypoint:
-            print("DEBUG: Drawing orange preview for waypoint")
-            self.draw_point(pos, QColor("orange"), radius=8, temporary=True)
-            self.on_point_selected("waypoint", pos.x(), pos.y())
-            event.accept()
         else:
+            # Normal mode - just visual feedback
             self.draw_point(pos, QColor("gray"), radius=6, temporary=True)
         
-        if self.dragMode() == QGraphicsView.DragMode.ScrollHandDrag and not (self._is_selecting_start or self._is_selecting_end or self._is_selecting_waypoint):
+        if self.dragMode() == QGraphicsView.DragMode.ScrollHandDrag:
             super().mousePressEvent(event)
         else:
             event.accept()
@@ -504,44 +479,6 @@ class MapViewer(QGraphicsView):
         elif point_type == "end" and self._permanent_end_item:
             self.scene.removeItem(self._permanent_end_item)
             self._permanent_end_item = None
-
-    def add_waypoint_marker(self, pos: QPointF, number: int):
-        """Add a waypoint marker to the map with number label"""
-        radius = 7
-        marker = QGraphicsEllipseItem(pos.x() - radius, pos.y() - radius, 2 * radius, 2 * radius)
-        marker.setBrush(QBrush(QColor(255, 152, 0)))  # Orange
-        marker.setPen(QPen(QColor(230, 81, 0), 2))
-        marker.setZValue(2)
-        marker.setToolTip(f"Waypoint {number}")
-        self.scene.addItem(marker)
-        self.waypoint_markers.append(marker)
-        
-        # Add number label
-        text_item = QGraphicsSimpleTextItem(str(number))
-        text_font = QFont("Arial", 9, QFont.Weight.Bold)
-        text_item.setFont(text_font)
-        text_item.setBrush(QBrush(QColor("white")))
-        
-        # Center the text on the marker
-        text_rect = text_item.boundingRect()
-        text_x = pos.x() - text_rect.width() / 2
-        text_y = pos.y() - text_rect.height() / 2
-        text_item.setPos(text_x, text_y)
-        text_item.setZValue(3)  # On top of marker
-        
-        self.scene.addItem(text_item)
-        self.waypoint_markers.append(text_item)  # Store text too
-        
-        return marker
-
-    def clear_waypoint_markers(self):
-        """Clear all waypoint markers"""
-        count = len(self.waypoint_markers)
-        for marker in self.waypoint_markers:
-            if marker and marker.scene() == self.scene:
-                self.scene.removeItem(marker)
-        self.waypoint_markers.clear()
-        print(f"Cleared {count} waypoint markers from map")
 
     # Traffic Light Visuals
     def draw_traffic_light_icon(self, pos: QPointF, temporary=False):

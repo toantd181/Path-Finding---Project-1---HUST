@@ -1,86 +1,33 @@
-import sys # Import sys
-import os  # Import os
-import numpy as np # Import numpy
+import sys
+import os
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QHBoxLayout, QWidget,
-                             QMessageBox, QGraphicsScene, QGraphicsRectItem,
-                             QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsSimpleTextItem,
-                             QGraphicsView) # Add QGraphicsView
-from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer, QLineF # Added QLineF
-from PyQt6.QtGui import QColor, QBrush, QPen, QKeyEvent
+                             QMessageBox, QGraphicsView)
+from PyQt6.QtCore import Qt, QPointF, QLineF
+from PyQt6.QtGui import QKeyEvent
 from .map_viewer import MapViewer, EFFECT_DATA_KEY
 from .pathfinding import Pathfinding
 from .sidebar import Sidebar
-from .tools.traffic_light_tool import TrafficLightInstance, TrafficLightState # Import traffic light specifics
+from .tools.traffic_light_tool import TrafficLightInstance, TrafficLightState
 
-# --- Geometry Helper Functions ---
+from itertools import permutations  
 
-def _on_segment(p: QPointF, q: QPointF, r: QPointF) -> bool:
-    """Check if point q lies on segment pr"""
-    return (q.x() <= max(p.x(), r.x()) and q.x() >= min(p.x(), r.x()) and
-            q.y() <= max(p.y(), r.y()) and q.y() >= min(p.y(), r.y()))
 
-def _orientation(p: QPointF, q: QPointF, r: QPointF) -> int:
-    """Find orientation of ordered triplet (p, q, r).
-    Returns:
-        0 --> p, q and r are collinear
-        1 --> Clockwise
-        2 --> Counterclockwise
-    """
-    val = (q.y() - p.y()) * (r.x() - q.x()) - \
-          (q.x() - p.x()) * (r.y() - q.y())
-    if val == 0: return 0  # Collinear
-    return 1 if val > 0 else 2  # Clockwise or Counterclockwise
-
-def _segments_intersect(p1: QPointF, q1: QPointF, p2: QPointF, q2: QPointF) -> bool:
-    """Check if line segment 'p1q1' and 'p2q2' intersect."""
-    o1 = _orientation(p1, q1, p2)
-    o2 = _orientation(p1, q1, q2)
-    o3 = _orientation(p2, q2, p1)
-    o4 = _orientation(p2, q2, q1)
-
-    # General case
-    if o1 != o2 and o3 != o4:
-        return True
-
-    # Special Cases
-    # p1, q1 and p2 are collinear and p2 lies on segment p1q1
-    if o1 == 0 and _on_segment(p1, p2, q1): return True
-    # p1, q1 and q2 are collinear and q2 lies on segment p1q1
-    if o2 == 0 and _on_segment(p1, q2, q1): return True
-    # p2, q2 and p1 are collinear and p1 lies on segment p2q2
-    if o3 == 0 and _on_segment(p2, p1, q2): return True
-    # p2, q2 and q1 are collinear and q1 lies on segment p2q2
-    if o4 == 0 and _on_segment(p2, q1, q2): return True
-
-    return False # Doesn't intersect
-
-# --- New Geometry Helper: Distance from point to line segment ---
 def point_segment_distance(p: QPointF, a: QPointF, b: QPointF) -> float:
     """Calculates the shortest distance from point p to line segment ab."""
-    # Vector AB
     ab_x = b.x() - a.x()
     ab_y = b.y() - a.y()
-    # Vector AP
     ap_x = p.x() - a.x()
     ap_y = p.y() - a.y()
 
-    # Length squared of AB
     len_sq_ab = ab_x * ab_x + ab_y * ab_y
-    if abs(len_sq_ab) < 1e-9: # A and B are essentially the same point
+    if abs(len_sq_ab) < 1e-9:
         return QLineF(p, a).length()
 
-    # t = dot(AP, AB) / |AB|^2
     t = (ap_x * ab_x + ap_y * ab_y) / len_sq_ab
-
-    if t < 0: # Closest point on line AB is A
-        closest_point_on_line = a
-    elif t > 1: # Closest point on line AB is B
-        closest_point_on_line = b
-    else: # Projection falls on the segment AB
-        closest_point_on_line = QPointF(a.x() + t * ab_x, a.y() + t * ab_y)
-
+    t = max(0.0, min(1.0, t))
+    
+    closest_point_on_line = QPointF(a.x() + t * ab_x, a.y() + t * ab_y)
     return QLineF(p, closest_point_on_line).length()
-# --- End Geometry Helper Functions ---
 
 
 class MainWindow(QMainWindow):
@@ -88,93 +35,282 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("Offline Pathfinding App")
-        self.setGeometry(100, 100, 1200, 700) # Adjusted size
+        self.setGeometry(100, 100, 1200, 700)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
         main_layout = QHBoxLayout(central_widget)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
 
-        # --- Sidebar ---
+        # Sidebar
         self.sidebar = Sidebar()
         self.sidebar.find_path_button.clicked.connect(self._trigger_pathfinding)
 
-        # --- Scene and Map Viewer ---
-        self.scene = QGraphicsScene(self)
+        # Map Viewer
         map_file = os.path.join(os.path.dirname(__file__), "assets", "map.png")
-        self.map_viewer = MapViewer(map_file, self._handle_point_selected, self.scene)
+        self.map_viewer = MapViewer(map_file, self._handle_point_selected)
 
         main_layout.addWidget(self.sidebar)
         main_layout.addWidget(self.map_viewer, 1)
 
-        # --- Pathfinding Initialization ---
+        # Pathfinding Initialization
         db_file = os.path.join(os.path.dirname(__file__), "data", "graph.db")
         self.pathfinder = None
         try:
-            self.pathfinder = Pathfinding(db_file) # Pathfinding now stores db_path
+            self.pathfinder = Pathfinding(db_file)
             print("Pathfinding engine initialized.")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to initialize pathfinding: {e}")
             print(f"Error initializing Pathfinding: {e}")
-            # Consider disabling features if pathfinder fails
 
         self.start_node = None
         self.end_node = None
         self.node_positions = {}
-        self._effect_application_threshold = 15 # Default threshold in pixels, adjust as needed
+        self._effect_application_threshold = 20  # Increased for better click detection
+        
         if self.pathfinder:
-            # Extract node positions from the graph
             for node_id, data in self.pathfinder.graph.nodes(data=True):
                 if 'pos' in data:
                     self.node_positions[node_id] = data['pos']
             print(f"Loaded {len(self.node_positions)} node positions.")
-            # Store original weights for resetting
-            # Correctly unpack u, v, data when data=True
+            
             self._original_weights = {}
-            if self.pathfinder.graph.number_of_edges() > 0: # Check if there are edges
+            if self.pathfinder.graph.number_of_edges() > 0:
                 try:
                     self._original_weights = {(u, v): data['weight'] for u, v, data in self.pathfinder.graph.edges(data=True) if 'weight' in data}
                     print(f"Stored original weights for {len(self._original_weights)} edges.")
                 except KeyError as e:
-                    print(f"Warning: Missing 'weight' attribute for an edge: {e}. Original weights might be incomplete.")
-            else:
-                print("Graph has no edges, no original weights to store.")
+                    print(f"Warning: Missing 'weight' attribute for an edge: {e}.")
             
-            self._initialize_search_tool() # Call after pathfinder and node_positions are ready
+            self._initialize_search_tool()
 
+        # Traffic Light Management
+        self._active_traffic_lights = {}
 
-        # --- Traffic Light Management ---
-        # Store active TrafficLightInstance objects, keyed by icon item's memory address
-        # Value is now a tuple: (instance, text_item)
-        self._active_traffic_lights = {} # {icon_item_id: (TrafficLightInstance, QGraphicsSimpleTextItem)}
-
-        # --- Connect Signals ---
-        # Tools activation
+        # Connect Signals - Selection Mode
+        self.sidebar.set_start_mode_button.toggled.connect(self._on_start_mode_toggled)
+        self.sidebar.set_end_mode_button.toggled.connect(self._on_end_mode_toggled)
+        self.sidebar.add_waypoint_button.toggled.connect(self._on_waypoint_mode_toggled)
+        self.sidebar.clear_start_button.clicked.connect(self._clear_start_point)
+        self.sidebar.clear_end_button.clicked.connect(self._clear_end_point)
+        
+        # Connect Signals - Tools
         self.sidebar.traffic_tool_activated.connect(self.map_viewer.set_traffic_drawing_mode)
-        self.sidebar.rain_tool_activated.connect(self.map_viewer.set_rain_drawing_mode)
         self.sidebar.block_way_tool_activated.connect(self.map_viewer.set_block_way_drawing_mode)
-        self.sidebar.traffic_light_tool_activated.connect(self.map_viewer.set_traffic_light_placement_mode) # Connect new tool
-        # self.sidebar.car_mode_tool_activated.connect(self.map_viewer.set_car_mode_drawing_mode) # Old connection
-        self.sidebar.place_car_block_drawing_tool_activated.connect(self.map_viewer.set_car_mode_drawing_mode) # Connect new Car Mode drawing signal
+        self.sidebar.traffic_light_tool_activated.connect(self.map_viewer.set_traffic_light_placement_mode)
 
-        # Drawing results / Effect placement
+        # Connect Signals - Drawing Results
         self.map_viewer.traffic_line_drawn.connect(self.handle_traffic_line)
-        self.map_viewer.rain_area_defined.connect(self.handle_rain_area)
         self.map_viewer.block_way_drawn.connect(self.handle_block_way)
-        # Connect new traffic light signals
-        # self.map_viewer.traffic_light_line_drawn.connect(self.handle_traffic_light_finalized) # Old signal
-        self.map_viewer.traffic_light_visuals_created.connect(self.handle_traffic_light_finalized) # New signal - This connection is now correct
-        self.map_viewer.car_block_point_placed.connect(self.handle_car_block_point_placed) # Connect Car Mode click
+        self.map_viewer.traffic_light_visuals_created.connect(self.handle_traffic_light_finalized)
+        self.map_viewer.effects_changed.connect(self._handle_effects_changed)
 
-        # Effect removal / changes
-        self.map_viewer.effects_changed.connect(self._handle_effects_changed) # Connect effect removal
-
-        # Connect search signals
+        # Connect Signals - Location Search
         self.sidebar.location_selected_for_start.connect(self._handle_location_selected_for_start)
         self.sidebar.location_selected_for_end.connect(self._handle_location_selected_for_end)
         self.sidebar.use_map_start_clicked.connect(self._handle_use_map_start_clicked)
         self.sidebar.use_map_end_clicked.connect(self._handle_use_map_end_clicked)
 
+        # Connect Signals - Clear Effect Buttons
+        self.sidebar.clear_traffic_jams_button.clicked.connect(self._clear_traffic_jams)
+        self.sidebar.clear_block_ways_button.clicked.connect(self._clear_block_ways)
+        self.sidebar.clear_traffic_lights_button.clicked.connect(self._clear_traffic_lights)
+        self.sidebar.clear_all_effects_button.clicked.connect(self._clear_all_effects)
+        self.sidebar.clear_waypoints_button.clicked.connect(self._clear_all_waypoints)
+        self.sidebar.remove_waypoint_button.clicked.connect(self._remove_selected_waypoint)
+
+    def _on_start_mode_toggled(self, checked):
+        """Handle start selection mode toggle"""
+        self.map_viewer.set_start_selection_mode(checked)
+        if checked:
+            self.sidebar._uncheck_other_tools(self.sidebar.set_start_mode_button)
+            print("Start selection mode activated - Click on map to set start point")
+
+    def _on_end_mode_toggled(self, checked):
+        """Handle end selection mode toggle"""
+        self.map_viewer.set_end_selection_mode(checked)
+        if checked:
+            self.sidebar._uncheck_other_tools(self.sidebar.set_end_mode_button)
+            print("End selection mode activated - Click on map to set end point")
+
+    def _on_waypoint_mode_toggled(self, checked):
+        """Handle waypoint selection mode toggle"""
+        self.map_viewer.set_waypoint_selection_mode(checked)
+        if checked:
+            self.sidebar._uncheck_other_tools(self.sidebar.add_waypoint_button)
+            print("Waypoint mode activated - Click on map to add stops")
+
+    def _clear_start_point(self):
+        """Clear the start point"""
+        self.start_node = None
+        self.sidebar.start_label.setText("Start: Not Selected")
+        self.sidebar.clear_start_button.setEnabled(False)
+        self.map_viewer.clear_permanent_point("start")
+        self.sidebar.from_location_combo.setCurrentIndex(-1)
+        self.sidebar.from_location_combo.lineEdit().setText("")
+        self.map_viewer.clear_path()
+        print("Start point cleared")
+
+    def _clear_end_point(self):
+        """Clear the end point"""
+        self.end_node = None
+        self.sidebar.end_label.setText("End: Not Selected")
+        self.sidebar.clear_end_button.setEnabled(False)
+        self.map_viewer.clear_permanent_point("end")
+        self.sidebar.to_location_combo.setCurrentIndex(-1)
+        self.sidebar.to_location_combo.lineEdit().setText("")
+        self.map_viewer.clear_path()
+        print("End point cleared")
+
+    def _clear_traffic_jams(self):
+        """Clear all traffic jam effects"""
+        self.map_viewer.clear_traffic_jams()
+        self._recalculate_effects_and_path()
+        print("All traffic jams cleared")
+
+    def _clear_block_ways(self):
+        """Clear all block way effects"""
+        self.map_viewer.clear_block_ways()
+        self._recalculate_effects_and_path()
+        print("All block ways cleared")
+
+    def _clear_traffic_lights(self):
+        """Clear all traffic light effects"""
+        # Stop all timers first
+        for icon_id, (instance, text_item, icon_item, line_item) in list(self._active_traffic_lights.items()):
+            if instance:
+                instance.stop()
+        self._active_traffic_lights.clear()
+        
+        # Clear visuals
+        self.map_viewer.clear_traffic_lights()
+        self._recalculate_effects_and_path()
+        print("All traffic lights cleared")
+
+    def _clear_all_waypoints(self):
+        """Clear all waypoints and their visual markers"""
+        print("DEBUG: _clear_all_waypoints called")
+    
+        # Get the virtual node IDs for start and end points (to preserve them)
+        preserve_nodes = set()
+        if self.start_node and self.start_node.startswith('VIRTUAL_'):
+            preserve_nodes.add(self.start_node)
+            print(f"Preserving start virtual node: {self.start_node}")
+        if self.end_node and self.end_node.startswith('VIRTUAL_'):
+            preserve_nodes.add(self.end_node)
+            print(f"Preserving end virtual node: {self.end_node}")
+    
+        # Clear from sidebar
+        cleared = self.sidebar._clear_all_waypoints()
+        print(f"DEBUG: Cleared {len(cleared)} waypoints from sidebar")
+    
+        # Clear visual markers from map
+        print(f"DEBUG: Waypoint markers before clear: {len(self.map_viewer.waypoint_markers)}")
+        self.map_viewer.clear_waypoint_markers()
+        print(f"DEBUG: Waypoint markers after clear: {len(self.map_viewer.waypoint_markers)}")
+    
+        # Remove virtual nodes from graph (but preserve start/end)
+        self._remove_virtual_nodes(exclude_nodes=preserve_nodes)
+    
+        # Recalculate path without waypoints
+        if self.start_node and self.end_node:
+            self._trigger_pathfinding()
+    
+        print(f"Cleared {len(cleared)} waypoints and their markers")
+
+    def _remove_selected_waypoint(self):
+        """Remove selected waypoint"""
+        current_row = self.sidebar.waypoints_list.currentRow()
+        if current_row < 0:
+            print("No waypoint selected")
+            return
+        
+        # Get the waypoint data before removing
+        if current_row >= len(self.sidebar.waypoints):
+            print(f"Error: Invalid row {current_row}, only {len(self.sidebar.waypoints)} waypoints")
+            return
+        
+        removed_waypoint = self.sidebar.waypoints[current_row]
+        
+        # Remove from sidebar (this updates both list widget and data)
+        self.sidebar.waypoints_list.takeItem(current_row)
+        self.sidebar.waypoints.pop(current_row)
+        
+        print(f"Removed waypoint at position {current_row}: {removed_waypoint['node_id']}")
+        
+        # Clear all waypoint markers and redraw remaining ones
+        self.map_viewer.clear_waypoint_markers()
+        
+        # Redraw remaining waypoints with updated numbers
+        for i, wp in enumerate(self.sidebar.waypoints):
+            pos = QPointF(wp['pos'][0], wp['pos'][1])
+            self.map_viewer.add_waypoint_marker(pos, i + 1)
+        
+        # Update the list widget text to reflect new numbering
+        for i in range(self.sidebar.waypoints_list.count()):
+            wp = self.sidebar.waypoints[i]
+            item_text = f"{i + 1}. {wp['name']}"
+            self.sidebar.waypoints_list.item(i).setText(item_text)
+        
+        # Remove virtual node from graph if it was virtual (but check it's not start/end)
+        if removed_waypoint['node_id'].startswith('VIRTUAL_'):
+            # Only remove if it's not the start or end node
+            if removed_waypoint['node_id'] != self.start_node and removed_waypoint['node_id'] != self.end_node:
+                self._remove_virtual_node(removed_waypoint['node_id'])
+            else:
+                print(f"Skipping removal of {removed_waypoint['node_id']} - it's a start/end point")
+        
+        # Recalculate path
+        if self.start_node and self.end_node:
+            if self.sidebar.waypoints:
+                self._trigger_pathfinding_with_waypoints()
+            else:
+                self._trigger_pathfinding()
+        
+        print(f"Removed waypoint: {removed_waypoint['node_id']}")
+
+    def _remove_virtual_nodes(self, exclude_nodes=None):
+        """Remove all virtual nodes from the graph, optionally excluding specific ones"""
+        if exclude_nodes is None:
+            exclude_nodes = set()
+    
+        virtual_nodes = [
+            node for node in self.pathfinder.graph.nodes() 
+            if node.startswith('VIRTUAL_') and node not in exclude_nodes
+        ]
+    
+        for node in virtual_nodes:
+            self.pathfinder.graph.remove_node(node)
+            if node in self.node_positions:
+                del self.node_positions[node]
+    
+        if virtual_nodes:
+            print(f"Removed {len(virtual_nodes)} virtual nodes from graph (preserved {len(exclude_nodes)})")
+
+    def _remove_virtual_node(self, node_id):
+        """Remove a specific virtual node from the graph"""
+        if node_id in self.pathfinder.graph:
+            self.pathfinder.graph.remove_node(node_id)
+        if node_id in self.node_positions:
+            del self.node_positions[node_id]
+        print(f"Removed virtual node: {node_id}")
+
+    def _clear_all_effects(self):
+        """Clear all effects (traffic, blocks, lights, waypoints)"""
+        # Stop all traffic light timers
+        self.stop_all_traffic_light_timers()
+        
+        # Clear all visuals
+        self.map_viewer.clear_all_effects()
+        
+        # Clear waypoints
+        self._clear_all_waypoints()
+        
+        # Recalculate path
+        self._recalculate_effects_and_path()
+        print("All effects cleared")
 
     def _initialize_search_tool(self):
         if not self.pathfinder:
@@ -189,47 +325,41 @@ class MainWindow(QMainWindow):
             print("Search tool: No locations found to populate.")
 
     def _set_start_node_from_data(self, location_data):
-        """Helper to set start node from location data (node or special place)."""
+        """Helper to set start node from location data."""
         node_id_to_set = None
-        position_to_set = None # This will be a tuple (x,y)
-        display_name_for_label = location_data['display_name'].split(' (')[0] # Get name before "(Node)" or "(Place)"
+        position_to_set = None
+        display_name_for_label = location_data['display_name'].split(' (')[0]
 
         if location_data['type'] == 'node':
-            node_id_to_set = location_data['id'] # id is the node name
+            node_id_to_set = location_data['id']
             if node_id_to_set in self.node_positions:
                 position_to_set = self.node_positions[node_id_to_set]
             else:
-                QMessageBox.warning(self, "Error", f"Node '{node_id_to_set}' from search not found in map data.")
-                print(f"Error: Node {node_id_to_set} from search not in node_positions.")
+                QMessageBox.warning(self, "Error", f"Node '{node_id_to_set}' not found in map data.")
                 return False
         elif location_data['type'] == 'special_place':
             sp_x, sp_y = location_data['pos']
-            # Find the nearest graph node to this special place's coordinates
             node_id_to_set = self._find_nearest_node(sp_x, sp_y)
             if node_id_to_set and node_id_to_set in self.node_positions:
                 position_to_set = self.node_positions[node_id_to_set]
-                # Label should show special place name, but indicate the snapped node
-                display_name_for_label = f"{location_data['name']} (near Node {node_id_to_set})"
+                display_name_for_label = f"{location_data['name']} (near {node_id_to_set})"
             else:
-                QMessageBox.warning(self, "Error", f"Could not find a nearby map node for special place '{location_data['name']}'.")
-                print(f"Error: Could not find nearest node for special place {location_data['name']} or its position.")
+                QMessageBox.warning(self, "Error", f"Could not find nearby node for '{location_data['name']}'.")
                 return False
-        else:
-            print(f"Unknown location type: {location_data['type']}")
-            return False
 
         if node_id_to_set and position_to_set:
             if node_id_to_set == self.end_node:
-                QMessageBox.warning(self, "Selection Error", "Start location cannot be the same as the end location.")
-                self.sidebar.from_location_combo.setCurrentIndex(-1) # Clear invalid selection
+                QMessageBox.warning(self, "Selection Error", "Start cannot be the same as end location.")
+                self.sidebar.from_location_combo.setCurrentIndex(-1)
                 self.sidebar.from_location_combo.lineEdit().setText("")
                 return False
 
             self.start_node = node_id_to_set
             snapped_pos = QPointF(position_to_set[0], position_to_set[1])
             self.sidebar.start_label.setText(f"Start: {display_name_for_label}")
+            self.sidebar.clear_start_button.setEnabled(True)
             self.map_viewer.set_permanent_point("start", snapped_pos)
-            print(f"Start node set to {self.start_node} via search: {location_data['display_name']}")
+            print(f"Start node set to {self.start_node}")
             return True
         return False
 
@@ -244,47 +374,51 @@ class MainWindow(QMainWindow):
             if node_id_to_set in self.node_positions:
                 position_to_set = self.node_positions[node_id_to_set]
             else:
-                QMessageBox.warning(self, "Error", f"Node '{node_id_to_set}' from search not found in map data.")
-                print(f"Error: Node {node_id_to_set} from search not in node_positions.")
+                QMessageBox.warning(self, "Error", f"Node '{node_id_to_set}' not found in map data.")
                 return False
         elif location_data['type'] == 'special_place':
             sp_x, sp_y = location_data['pos']
             node_id_to_set = self._find_nearest_node(sp_x, sp_y)
             if node_id_to_set and node_id_to_set in self.node_positions:
                 position_to_set = self.node_positions[node_id_to_set]
-                display_name_for_label = f"{location_data['name']} (near Node {node_id_to_set})"
+                display_name_for_label = f"{location_data['name']} (near {node_id_to_set})"
             else:
-                QMessageBox.warning(self, "Error", f"Could not find a nearby map node for special place '{location_data['name']}'.")
-                print(f"Error: Could not find nearest node for special place {location_data['name']} or its position.")
+                QMessageBox.warning(self, "Error", f"Could not find nearby node for '{location_data['name']}'.")
                 return False
-        else:
-            print(f"Unknown location type: {location_data['type']}")
-            return False
 
         if node_id_to_set and position_to_set:
             if node_id_to_set == self.start_node:
-                QMessageBox.warning(self, "Selection Error", "End location cannot be the same as the start location.")
-                self.sidebar.to_location_combo.setCurrentIndex(-1) # Clear invalid selection
+                QMessageBox.warning(self, "Selection Error", "End cannot be the same as start location.")
+                self.sidebar.to_location_combo.setCurrentIndex(-1)
                 self.sidebar.to_location_combo.lineEdit().setText("")
                 return False
 
             self.end_node = node_id_to_set
             snapped_pos = QPointF(position_to_set[0], position_to_set[1])
             self.sidebar.end_label.setText(f"End: {display_name_for_label}")
+            self.sidebar.clear_end_button.setEnabled(True)
             self.map_viewer.set_permanent_point("end", snapped_pos)
-            print(f"End node set to {self.end_node} via search: {location_data['display_name']}")
+            print(f"End node set to {self.end_node}")
             return True
         return False
 
     def _handle_location_selected_for_start(self, location_data):
         if self._set_start_node_from_data(location_data):
+            # Auto-deactivate start selection mode after selecting from search
+            if self.sidebar.set_start_mode_button.isChecked():
+                self.sidebar.set_start_mode_button.setChecked(False)
+            
             if self.start_node and self.end_node:
                 self._trigger_pathfinding()
             else:
-                self.map_viewer.clear_path() # Clear path if only one point is set/changed
+                self.map_viewer.clear_path()
 
     def _handle_location_selected_for_end(self, location_data):
         if self._set_end_node_from_data(location_data):
+            # Auto-deactivate end selection mode after selecting from search
+            if self.sidebar.set_end_mode_button.isChecked():
+                self.sidebar.set_end_mode_button.setChecked(False)
+            
             if self.start_node and self.end_node:
                 self._trigger_pathfinding()
             else:
@@ -292,107 +426,58 @@ class MainWindow(QMainWindow):
 
     def _handle_use_map_start_clicked(self):
         if self.start_node and self.start_node in self.node_positions:
-            self.sidebar.start_label.setText(f"Start: Node {self.start_node} (Map)")
-            # Update the combo box to show this, but don't select an item from its list
-            self.sidebar.from_location_combo.lineEdit().setText(f"Node {self.start_node} (Map Selection)")
-            self.sidebar.from_location_combo.setCurrentIndex(-1) # Ensure no item is actually selected in dropdown
-            print(f"Used current map start point: Node {self.start_node}")
-        else:
-            QMessageBox.information(self, "Info", "No start point selected on the map to use.")
-            self.sidebar.start_label.setText("Start: Not Selected")
-            self.sidebar.from_location_combo.lineEdit().setText("")
+            self.sidebar.start_label.setText(f"Start: {self.start_node} (Map)")
+            self.sidebar.from_location_combo.lineEdit().setText(f"{self.start_node} (Map)")
             self.sidebar.from_location_combo.setCurrentIndex(-1)
+            # Auto-deactivate mode
+            if self.sidebar.set_start_mode_button.isChecked():
+                self.sidebar.set_start_mode_button.setChecked(False)
+        else:
+            # No start point yet, activate selection mode
+            self.sidebar.set_start_mode_button.setChecked(True)
+            QMessageBox.information(self, "Info", "Click on the map to set start point.")
 
     def _handle_use_map_end_clicked(self):
         if self.end_node and self.end_node in self.node_positions:
-            self.sidebar.end_label.setText(f"End: Node {self.end_node} (Map)")
-            self.sidebar.to_location_combo.lineEdit().setText(f"Node {self.end_node} (Map Selection)")
+            self.sidebar.end_label.setText(f"End: {self.end_node} (Map)")
+            self.sidebar.to_location_combo.lineEdit().setText(f"{self.end_node} (Map)")
             self.sidebar.to_location_combo.setCurrentIndex(-1)
-            print(f"Used current map end point: Node {self.end_node}")
+            # Auto-deactivate mode
+            if self.sidebar.set_end_mode_button.isChecked():
+                self.sidebar.set_end_mode_button.setChecked(False)
         else:
-            QMessageBox.information(self, "Info", "No end point selected on the map to use.")
-            self.sidebar.end_label.setText("End: Not Selected")
-            self.sidebar.to_location_combo.lineEdit().setText("")
-            self.sidebar.to_location_combo.setCurrentIndex(-1)
-
-    def _update_combo_text_for_map_selection(self, point_type_str, node_id):
-        """Updates the corresponding QComboBox text when a point is selected/deselected on the map."""
-        combo = None
-        label_widget = None
-        label_prefix = ""
-
-        if point_type_str == "start":
-            combo = self.sidebar.from_location_combo
-            label_widget = self.sidebar.start_label
-            label_prefix = "Start: "
-        elif point_type_str == "end":
-            combo = self.sidebar.to_location_combo
-            label_widget = self.sidebar.end_label
-            label_prefix = "End: "
-        
-        if combo:
-            if node_id is None: # Point cleared
-                combo.setCurrentIndex(-1)
-                combo.lineEdit().setText("")
-                if label_widget: label_widget.setText(f"{label_prefix}Not Selected")
-            else:
-                # Try to find if this node_id matches an existing item in the combo's model
-                found_idx = -1
-                item_display_text = f"Node {node_id} (Map Selection)" # Default text
-                for i in range(combo.count()): # Iterate through items in ComboBox
-                    item_data = combo.itemData(i)
-                    # Check if the item_data corresponds to the selected node_id
-                    if item_data and item_data.get('type') == 'node' and item_data.get('id') == node_id:
-                        found_idx = i
-                        item_display_text = item_data.get('display_name', item_display_text)
-                        break
-                    # If node_id was derived from a special place, we can't easily reverse map to its display_name here
-                    # So, we'll just show "Node X (Map Selection)" or the direct node name if found.
-                
-                if found_idx != -1:
-                    combo.setCurrentIndex(found_idx) # This will also update the lineEdit text
-                    if label_widget: label_widget.setText(f"{label_prefix}{item_display_text.split(' (')[0]}")
-                else: # If not found as a pre-populated item (e.g. pure node click)
-                    combo.lineEdit().setText(item_display_text)
-                    combo.setCurrentIndex(-1) # Ensure no dropdown item is selected if text is custom
-                    if label_widget: label_widget.setText(f"{label_prefix}Node {node_id} (Map)")
-
+            # No end point yet, activate selection mode
+            self.sidebar.set_end_mode_button.setChecked(True)
+            QMessageBox.information(self, "Info", "Click on the map to set end point.")
 
     def _handle_effects_changed(self):
-        """Handles the signal emitted when an effect visual is removed."""
-        print("Effect removed, checking for stopped timers and recalculating...")
+        """Handle signal when an effect is removed."""
+        print("Effect removed, recalculating...")
 
-        # Check if any removed items were associated with active traffic lights
-        # Get current icon IDs from the stored visuals in MapViewer
-        # The tuple now contains (icon, line, text, data)
         active_icon_ids = {id(visual[0]) for visual in self.map_viewer.traffic_light_visuals}
         lights_to_remove = []
 
-        # Iterate over a copy of the keys since we might modify the dictionary
         for icon_id in list(self._active_traffic_lights.keys()):
             if icon_id not in active_icon_ids:
-                # Correctly unpack all four items, using _ for unused ones here
                 instance, text_item, _, _ = self._active_traffic_lights[icon_id]
-                print(f"Stopping timer for removed traffic light (icon id: {icon_id})")
+                print(f"Stopping timer for removed traffic light")
                 instance.stop()
-                # No need to manually remove text_item, MapViewer handles visual removal
                 lights_to_remove.append(icon_id)
 
         for icon_id in lights_to_remove:
-            if icon_id in self._active_traffic_lights: # Check if still exists before deleting
-                 del self._active_traffic_lights[icon_id]
+            if icon_id in self._active_traffic_lights:
+                del self._active_traffic_lights[icon_id]
 
-        # Recalculate everything after removal
         self._recalculate_effects_and_path()
 
     def handle_traffic_line(self, start_point, end_point):
-        """Handles the line drawn in traffic mode: Stores data on the visual item."""
-        if not self.pathfinder: return
+        """Handle traffic line drawn."""
+        if not self.pathfinder:
+            return
 
         traffic_weight_increase = self.sidebar.traffic_tool.get_weight()
         print(f"Traffic line drawn. Applying weight +{traffic_weight_increase}")
 
-        # Find the corresponding visual item (the last one added)
         if self.map_viewer.traffic_jam_lines:
             last_line_item = self.map_viewer.traffic_jam_lines[-1]
             traffic_data = {
@@ -402,47 +487,16 @@ class MainWindow(QMainWindow):
                 "end": end_point
             }
             last_line_item.setData(EFFECT_DATA_KEY, traffic_data)
-            print(f"Stored data on traffic line item: {traffic_data}")
-        else:
-            print("Warning: Could not find traffic line item to store data on.")
 
-        # --- Recalculate all effects and path ---
         self._recalculate_effects_and_path()
-
-
-    def handle_rain_area(self, area_rect: QRectF):
-        """Handles the rectangle drawn for rain: Stores data on the visual item."""
-        if not self.pathfinder: return
-
-        rain_intensity_name = self.sidebar.rain_tool.get_intensity_name()
-        rain_weight_increase = self.sidebar.rain_tool.get_weight_increase() # Get weight based on name
-        print(f"Rain area defined. Applying intensity '{rain_intensity_name}' (weight +{rain_weight_increase})")
-
-        # Find the corresponding visual item
-        if self.map_viewer.rain_area_visuals:
-            last_area_item = self.map_viewer.rain_area_visuals[-1]
-            rain_data = {
-                "type": "rain",
-                "intensity": rain_intensity_name, # Store name
-                "weight": rain_weight_increase,   # Store calculated weight
-                "rect": area_rect
-            }
-            last_area_item.setData(EFFECT_DATA_KEY, rain_data)
-            print(f"Stored data on rain area item: {rain_data}")
-        else:
-            print("Warning: Could not find rain area item to store data on.")
-
-        # --- Recalculate all effects and path ---
-        self._recalculate_effects_and_path()
-
 
     def handle_block_way(self, start_point, end_point):
-        """Handles the line drawn in block way mode: Stores data."""
-        if not self.pathfinder: return
+        """Handle block way line drawn."""
+        if not self.pathfinder:
+            return
 
         print(f"Block way line drawn from {start_point} to {end_point}")
 
-        # Find the corresponding visual item
         if self.map_viewer.block_way_visuals:
             last_block_item = self.map_viewer.block_way_visuals[-1]
             block_data = {
@@ -451,156 +505,71 @@ class MainWindow(QMainWindow):
                 "end": end_point
             }
             last_block_item.setData(EFFECT_DATA_KEY, block_data)
-            print(f"Stored data on block way item: {block_data}")
-        else:
-            print("Warning: Could not find block way item to store data on.")
 
-        # --- Recalculate all effects and path ---
         self._recalculate_effects_and_path()
 
-    # --- Car Mode Handling --- New Method ---
-    def handle_car_block_point_placed(self, click_pos: QPointF):
-        """Handles a click intended to block the nearest edge for car mode."""
-        if not self.pathfinder or not self.node_positions:
-            print("Pathfinder or node positions not available for car block.")
+    def handle_traffic_light_finalized(self, icon_pos, line_start, line_end, icon_item, line_item, text_item):
+        """Handle finalized traffic light placement."""
+        if not self.pathfinder:
             return
 
-        min_dist = float('inf')
-        nearest_edge_nodes = None
-        nearest_edge_midpoint = None
-
-        for u, v, data in self.pathfinder.graph.edges(data=True):
-            try:
-                pos_u = QPointF(*self.node_positions[u])
-                pos_v = QPointF(*self.node_positions[v])
-
-                dist = point_segment_distance(click_pos, pos_u, pos_v)
-
-                if dist < min_dist:
-                    min_dist = dist
-                    nearest_edge_nodes = (u, v)
-                    nearest_edge_midpoint = QPointF((pos_u.x() + pos_v.x()) / 2, (pos_u.y() + pos_v.y()) / 2)
-
-            except KeyError:
-                # Should not happen if graph and node_positions are consistent
-                print(f"Warning: Node position missing for edge ({u}-{v}) during car block check.")
-                continue
-
-        if nearest_edge_nodes and nearest_edge_midpoint:
-            u, v = nearest_edge_nodes
-            print(f"Car block placed. Nearest edge: {u}-{v} (distance: {min_dist:.2f}). Blocking it.")
-
-            # Create visual marker at the midpoint of the blocked edge
-            marker_tooltip = f"Edge {u}-{v}"
-            marker_item = self.map_viewer.draw_car_block_marker(nearest_edge_midpoint, marker_tooltip)
-
-            car_block_data = {
-                "type": "car_block",
-                "click_pos": click_pos, # Store original click for reference if needed
-                "blocked_edge_nodes": nearest_edge_nodes,
-                "edge_midpoint": nearest_edge_midpoint # For potential re-drawing or identification
-            }
-            marker_item.setData(EFFECT_DATA_KEY, car_block_data)
-            print(f"Stored data on car block marker: {car_block_data}")
-
-            # Actual graph modification happens in _recalculate_effects_and_path
-            self._recalculate_effects_and_path()
-        else:
-            print("Could not find a nearest edge to block for car mode.")
-            # Optionally, uncheck the button if no edge found, or let user try again
-            # self.sidebar.car_mode_button.setChecked(False)
-
-
-    # --- Traffic Light Handling --- Modified Method ---
-    def handle_traffic_light_finalized(self, icon_pos, line_start, line_end, icon_item, line_item, text_item):
-        """Handles the finalized placement of a traffic light (icon + line + text)."""
-        if not self.pathfinder: return
-
-        # Get durations from the sidebar UI
         durations = self.sidebar.get_current_traffic_light_durations()
         print(f"Traffic light finalized at {icon_pos} with durations: {durations}")
 
-        # Visual items are now passed directly from the signal
-
-        # Create the state manager instance for this light
         traffic_light_instance = TrafficLightInstance(durations)
-        traffic_light_instance.state_changed.connect(self._traffic_light_state_updated) # Connect state change
-        # Connect the new countdown signal
+        traffic_light_instance.state_changed.connect(self._traffic_light_state_updated)
         traffic_light_instance.remaining_time_updated.connect(self._update_traffic_light_countdown_display)
 
-        # Store data on the visual items for reference and recalculation
-        # Note: MapViewer already stored basic data, we add the instance here
-        # Retrieve existing data and update it
-        existing_data = icon_item.data(EFFECT_DATA_KEY) or {} # Get data MapViewer stored
+        existing_data = icon_item.data(EFFECT_DATA_KEY) or {}
         traffic_light_data = {
-            **existing_data, # Keep existing keys like type, positions
+            **existing_data,
             "durations": durations,
-            "instance": traffic_light_instance, # Store the instance itself
-            "text_item": text_item # Keep reference to text item
+            "instance": traffic_light_instance,
+            "text_item": text_item
         }
-        # Update data stored on items
+        
         icon_item.setData(EFFECT_DATA_KEY, traffic_light_data)
         line_item.setData(EFFECT_DATA_KEY, traffic_light_data)
         text_item.setData(EFFECT_DATA_KEY, traffic_light_data)
 
-        # Update the data stored in MapViewer's list as well
         for i, (ic, ln, tx, data) in enumerate(self.map_viewer.traffic_light_visuals):
-             if ic == icon_item:
-                 self.map_viewer.traffic_light_visuals[i] = (ic, ln, tx, traffic_light_data)
-                 break
+            if ic == icon_item:
+                self.map_viewer.traffic_light_visuals[i] = (ic, ln, tx, traffic_light_data)
+                break
 
-        # Store the active instance and text_item, keyed by icon item's ID
         icon_id = id(icon_item)
         self._active_traffic_lights[icon_id] = (traffic_light_instance, text_item, icon_item, line_item)
-        print(f"Stored data and started timer for traffic light (icon id: {icon_id})")
 
-        # Update the visual state immediately (e.g., tooltip, initial countdown, text color)
-        self.map_viewer.update_traffic_light_visual_state(icon_item, text_item, traffic_light_instance.current_state) # Pass text_item
+        self.map_viewer.update_traffic_light_visual_state(icon_item, text_item, traffic_light_instance.current_state)
         self.map_viewer.update_traffic_light_countdown(text_item, traffic_light_instance.get_remaining_time())
 
-        # --- Recalculate all effects and path ---
         self._recalculate_effects_and_path()
 
-
     def _traffic_light_state_updated(self):
-        print(f"DEBUG: MainWindow._traffic_light_state_updated called by: {self.sender()}") # DEBUG
         traffic_light_instance = self.sender()
         if traffic_light_instance and isinstance(traffic_light_instance, TrafficLightInstance):
-            print(f"DEBUG: MainWindow: Signal from TrafficLightInstance. New state: {traffic_light_instance.current_state}") # DEBUG
-
-            # Find the corresponding visual icon and text item to update appearance/tooltip
             found_icon_item = None
             found_text_item = None
-            # The value in _active_traffic_lights is (instance, text_item, icon_item, line_item)
-            # Unpack all four items. Use _ for items not immediately needed if any.
+            
             for _icon_id, (instance_from_dict, text_item_from_dict, icon_item_from_dict, _line_item_from_dict) in self._active_traffic_lights.items():
-                 if instance_from_dict == traffic_light_instance:
-                     found_icon_item = icon_item_from_dict
-                     found_text_item = text_item_from_dict
-                     break
-            # The previous inner loop searching self.map_viewer.traffic_light_visuals to find
-            # icon_item using icon_id is no longer necessary as icon_item_from_dict is directly available.
+                if instance_from_dict == traffic_light_instance:
+                    found_icon_item = icon_item_from_dict
+                    found_text_item = text_item_from_dict
+                    break
 
             if found_icon_item and found_text_item:
-                 # Update tooltip AND text color
-                 self.map_viewer.update_traffic_light_visual_state(found_icon_item, found_text_item, traffic_light_instance.current_state) # Pass text_item
-                 # Update countdown immediately on state change as well
-                 self.map_viewer.update_traffic_light_countdown(found_text_item, traffic_light_instance.get_remaining_time())
-            else:
-                 print("Warning: Could not find visual item for updated traffic light instance.")
+                self.map_viewer.update_traffic_light_visual_state(found_icon_item, found_text_item, traffic_light_instance.current_state)
+                self.map_viewer.update_traffic_light_countdown(found_text_item, traffic_light_instance.get_remaining_time())
 
-
-        # Recalculate paths since weights have changed
         self._recalculate_effects_and_path()
 
     def _update_traffic_light_countdown_display(self, remaining_seconds: int):
-        """Slot called when a TrafficLightInstance emits remaining time."""
+        """Update countdown display."""
         sender_instance = self.sender()
-        if not isinstance(sender_instance, TrafficLightInstance): return
+        if not isinstance(sender_instance, TrafficLightInstance):
+            return
 
-        # Find the text item associated with this instance
         found_text_item = None
-        # Unpack all four items, using _ for items not directly used in this loop's logic
         for instance, text_item, _, _ in self._active_traffic_lights.values():
             if instance == sender_instance:
                 found_text_item = text_item
@@ -608,30 +577,15 @@ class MainWindow(QMainWindow):
 
         if found_text_item:
             self.map_viewer.update_traffic_light_countdown(found_text_item, remaining_seconds)
-        # else: # This might print too often if an instance is somehow detached
-        #     print("Warning: Could not find text item for countdown update.")
 
-
-    # --- Recalculation Logic ---
     def _recalculate_effects_and_path(self):
-        if not self.pathfinder or not self.pathfinder.graph: # Ensure graph exists
-            print("DEBUG: MainWindow: Pathfinder or graph not available for recalculation.")
+        if not self.pathfinder or not self.pathfinder.graph:
             return
 
-        print("DEBUG: MainWindow: Entering _recalculate_effects_and_path.")
-        self.reset_graph_weights() # CRITICAL: Ensure this is called first
+        print("Recalculating effects and path...")
+        self.reset_graph_weights()
 
-        # --- Define a specific edge to trace for debugging ---
-        debug_edge_u = None # "node_A" # Set to an actual node name to trace
-        debug_edge_v = None # "node_B" # Set to an actual node name to trace
-
-        if debug_edge_u and debug_edge_v and self.pathfinder.graph.has_edge(debug_edge_u, debug_edge_v):
-            print(f"DEBUG TRACE ({debug_edge_u}-{debug_edge_v}): Weight AFTER reset_graph_weights: {self.pathfinder.graph[debug_edge_u][debug_edge_v].get('weight')}")
-        elif debug_edge_u and debug_edge_v:
-            print(f"DEBUG TRACE: Edge ({debug_edge_u}-{debug_edge_v}) not found in graph for tracing after reset.")
-
-
-        # --- Apply Traffic Jam Effects ---
+        # Apply Traffic Jam Effects
         for line_item in self.map_viewer.traffic_jam_lines:
             data = line_item.data(EFFECT_DATA_KEY)
             if data and data.get("type") == "traffic":
@@ -639,254 +593,676 @@ class MainWindow(QMainWindow):
                 p2 = data["end"]
                 weight_increase = data["weight"]
                 affected_edges = self.pathfinder.find_edges_near_line(p1, p2, self._effect_application_threshold)
+                print(f"Traffic jam affecting {len(affected_edges)} edges with +{weight_increase}")
                 for u, v in affected_edges:
                     self.pathfinder.modify_edge_weight(u, v, add_weight=weight_increase)
-                    if debug_edge_u and debug_edge_v and (u,v) == (debug_edge_u, debug_edge_v):
-                        print(f"DEBUG TRACE ({debug_edge_u}-{debug_edge_v}): Weight AFTER traffic jam: {self.pathfinder.graph[u][v].get('weight')}")
 
-        # --- Apply Rain Area Effects ---
-        for rect_item in self.map_viewer.rain_area_visuals:
-            data = rect_item.data(EFFECT_DATA_KEY)
-            if data and data.get("type") == "rain":
-                rect = data["rect"]
-                weight_increase = data["weight"]
-                affected_edges = []
-                for u_edge, v_edge in self.pathfinder.graph.edges():
-                    pos_u_tuple = self.node_positions.get(u_edge)
-                    pos_v_tuple = self.node_positions.get(v_edge)
-                    if pos_u_tuple and pos_v_tuple:
-                        edge_mid_x = (pos_u_tuple[0] + pos_v_tuple[0]) / 2
-                        edge_mid_y = (pos_u_tuple[1] + pos_v_tuple[1]) / 2
-                        if rect.contains(QPointF(edge_mid_x, edge_mid_y)):
-                            affected_edges.append((u_edge, v_edge))
-                for u, v in affected_edges:
-                    self.pathfinder.modify_edge_weight(u, v, add_weight=weight_increase)
-                    if debug_edge_u and debug_edge_v and (u,v) == (debug_edge_u, debug_edge_v):
-                        print(f"DEBUG TRACE ({debug_edge_u}-{debug_edge_v}): Weight AFTER rain: {self.pathfinder.graph[u][v].get('weight')}")
-
-        # --- Apply Block Way Effects ---
+        # Apply Block Way Effects
         for line_item in self.map_viewer.block_way_visuals:
             data = line_item.data(EFFECT_DATA_KEY)
             if data and data.get("type") == "block_way":
                 p1 = data["start"]
                 p2 = data["end"]
                 affected_edges = self.pathfinder.find_edges_near_line(p1, p2, self._effect_application_threshold)
+                print(f"Block way affecting {len(affected_edges)} edges (setting to infinity)")
                 for u, v in affected_edges:
+                    print(f"  Blocking edge: {u} -> {v}")
                     self.pathfinder.modify_edge_weight(u, v, set_weight=float('inf'))
-                    if debug_edge_u and debug_edge_v and (u,v) == (debug_edge_u, debug_edge_v):
-                        print(f"DEBUG TRACE ({debug_edge_u}-{debug_edge_v}): Weight AFTER block_way: {self.pathfinder.graph[u][v].get('weight')}")
-        
-        # --- Apply Car Block Effects ---
-        for marker_item in self.map_viewer.car_block_visuals:
-            data = marker_item.data(EFFECT_DATA_KEY)
-            if data and data.get("type") == "car_block":
-                u, v = data["blocked_edge_nodes"]
-                self.pathfinder.modify_edge_weight(u, v, set_weight=float('inf'))
-                if debug_edge_u and debug_edge_v and (u,v) == (debug_edge_u, debug_edge_v):
-                     print(f"DEBUG TRACE ({debug_edge_u}-{debug_edge_v}): Weight AFTER car_block: {self.pathfinder.graph[u][v].get('weight')}")
 
-
-        # --- Apply Traffic Light Effects ---
-        print(f"DEBUG: MainWindow: Processing {len(self._active_traffic_lights)} active traffic lights for recalculation.")
+        # Apply Traffic Light Effects
         for icon_id, (traffic_light_instance, text_item, icon_item, line_item) in self._active_traffic_lights.items():
             if not traffic_light_instance:
                 continue
 
-            current_tl_state = traffic_light_instance.current_state
             weight_modifier = traffic_light_instance.get_current_weight_modifier()
-
-            # Get the effect line from the QGraphicsLineItem associated with this traffic light
             effect_qlinef = line_item.line()
             p1 = effect_qlinef.p1()
             p2 = effect_qlinef.p2()
             
             affected_edges_for_tl = self.pathfinder.find_edges_near_line(p1, p2, threshold=self._effect_application_threshold)
 
-            if debug_edge_u and debug_edge_v and (debug_edge_u, debug_edge_v) in affected_edges_for_tl:
-                print(f"DEBUG TRACE ({debug_edge_u}-{debug_edge_v}): Traffic light {icon_id} (State: {current_tl_state}) is affecting this edge.")
-                print(f"DEBUG TRACE ({debug_edge_u}-{debug_edge_v}): Weight BEFORE this TL mod: {self.pathfinder.graph[debug_edge_u][debug_edge_v].get('weight')}")
-                print(f"DEBUG TRACE ({debug_edge_u}-{debug_edge_v}): TL Modifier to ADD: {weight_modifier}")
-
             for u_edge, v_edge in affected_edges_for_tl:
-                if self.pathfinder.graph.has_edge(u_edge,v_edge):
+                if self.pathfinder.graph.has_edge(u_edge, v_edge):
                     self.pathfinder.modify_edge_weight(u_edge, v_edge, add_weight=weight_modifier)
 
-            if debug_edge_u and debug_edge_v and (debug_edge_u, debug_edge_v) in affected_edges_for_tl:
-                 print(f"DEBUG TRACE ({debug_edge_u}-{debug_edge_v}): Weight AFTER this TL mod: {self.pathfinder.graph[debug_edge_u][debug_edge_v].get('weight')}")
-
-
-        # --- Recalculate path if start and end points are set ---
+        # Recalculate path if both points are set
         if self.start_node and self.end_node:
-            print(f"DEBUG: MainWindow: Start ({self.start_node}) and End ({self.end_node}) nodes are set. Calling _trigger_pathfinding after all effects.")
             self._trigger_pathfinding()
         else:
-            print("DEBUG: MainWindow: Start or End node not set. Pathfinding not triggered after recalculation.")
             self.map_viewer.clear_path()
-        print("DEBUG: MainWindow: Exiting _recalculate_effects_and_path.")
 
     def reset_graph_weights(self):
-        """Resets graph edge weights to their original values."""
-        print("Resetting graph weights to original values...")
+        """Reset graph edge weights to original values."""
         if not self.pathfinder or not self._original_weights:
-            print("  Cannot reset weights: Pathfinding not ready or original weights missing.")
             return
 
         for (u, v), original_weight in self._original_weights.items():
             if self.pathfinder.graph.has_edge(u, v):
                 self.pathfinder.graph[u][v]['weight'] = original_weight
-            # else: # Edge might have been removed (e.g., by map update later?)
-            #     print(f"  Warning: Original edge ({u},{v}) not found during weight reset.")
-        print(f"  Weights reset for {len(self._original_weights)} edges.")
-        # Note: This does NOT stop traffic light timers. That happens on removal or full clear.
 
     def stop_all_traffic_light_timers(self):
-        """Stops all active traffic light timers."""
-        print("Stopping all traffic light timers...")
+        """Stop all active traffic light timers."""
         for data_tuple in list(self._active_traffic_lights.values()):
-            tl_instance = data_tuple[0] # The first element is the TrafficLightInstance
+            tl_instance = data_tuple[0]
             if tl_instance: 
                 tl_instance.stop()
-        self._active_traffic_lights.clear() 
-        print("All traffic light timers stopped and instances cleared.")
-
+        self._active_traffic_lights.clear()
 
     def keyPressEvent(self, event: QKeyEvent):
-        """Handle key presses, e.g., Escape to cancel drawing."""
+        """Handle key presses."""
         if event.key() == Qt.Key.Key_Escape:
-            print("Escape pressed - Cancelling current drawing action.")
-            # Deactivate any active drawing tool by unchecking its button
+            print("Escape pressed - Cancelling current action.")
+            
             if self.sidebar._traffic_tool_active:
                 self.sidebar.traffic_jam_button.setChecked(False)
-            elif self.sidebar._rain_tool_active:
-                self.sidebar.rain_area_button.setChecked(False)
             elif self.sidebar._block_way_tool_active:
                 self.sidebar.block_way_button.setChecked(False)
             elif self.sidebar._traffic_light_tool_active or self.map_viewer._is_drawing_traffic_light_line:
-                 # If placing icon OR drawing line for traffic light
-                 self.sidebar.traffic_light_button.setChecked(False) # This triggers the toggle(false) signal
-                 # Explicitly clean up map viewer state as well
-                 self.map_viewer.set_traffic_light_placement_mode(False)
-            elif self.sidebar._place_car_block_drawing_active: # Check new state for drawing
-                self.sidebar.place_car_block_button.setChecked(False) # Uncheck the place button
-                # The map_viewer.set_car_mode_drawing_mode(False) should be called by the button's toggle signal
+                self.sidebar.traffic_light_button.setChecked(False)
+                self.map_viewer.set_traffic_light_placement_mode(False)
 
-
-            # Clean up any temporary visuals in MapViewer
             self.map_viewer._cleanup_temp_drawing()
-            # Restore default cursor and drag mode if not already done by set_*_mode(False)
             self.map_viewer.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
             self.map_viewer.setCursor(Qt.CursorShape.ArrowCursor)
-
         else:
-            super().keyPressEvent(event) # Pass other keys to the base class
+            super().keyPressEvent(event)
 
+    def _set_start_node_from_data(self, location_data):
+        """Helper to set start node from location data (node or special place)."""
+        node_id_to_set = None
+        position_to_set = None
+        display_name_for_label = location_data['display_name'].split(' (')[0]
 
-    # --- Point Selection and Pathfinding Logic ---
-    def _find_nearest_node(self, x, y):
-        """Finds the nearest graph node to a given scene coordinate."""
-        if not self.node_positions: return None
+        if location_data['type'] == 'node':
+            node_id_to_set = location_data['id']
+            if node_id_to_set in self.node_positions:
+                position_to_set = self.node_positions[node_id_to_set]
+            else:
+                QMessageBox.warning(self, "Error", f"Node '{node_id_to_set}' not found in map data.")
+                return False
+        elif location_data['type'] == 'special_place':
+            sp_x, sp_y = location_data['pos']
+            # Use simple nearest node for search results
+            node_id_to_set = self._find_simple_nearest_node(sp_x, sp_y)
+            if node_id_to_set and node_id_to_set in self.node_positions:
+                position_to_set = self.node_positions[node_id_to_set]
+                display_name_for_label = f"{location_data['name']} (near {node_id_to_set})"
+            else:
+                QMessageBox.warning(self, "Error", f"Could not find nearby node for special place '{location_data['name']}'.")
+                return False
+        else:
+            print(f"Unknown location type: {location_data['type']}")
+            return False
+
+        if node_id_to_set and position_to_set:
+            if node_id_to_set == self.end_node:
+                QMessageBox.warning(self, "Selection Error", "Start cannot be the same as the end location.")
+                self.sidebar.from_location_combo.setCurrentIndex(-1)
+                self.sidebar.from_location_combo.lineEdit().setText("")
+                return False
+
+            self.start_node = node_id_to_set
+            snapped_pos = QPointF(position_to_set[0], position_to_set[1])
+            self.sidebar.start_label.setText(f"Start: {display_name_for_label}")
+            self.sidebar.clear_start_button.setEnabled(True)
+            self.map_viewer.set_permanent_point("start", snapped_pos)
+            print(f"Start node set to {self.start_node}")
+            return True
+        return False
+
+    def _set_end_node_from_data(self, location_data):
+        """Helper to set end node from location data."""
+        node_id_to_set = None
+        position_to_set = None
+        display_name_for_label = location_data['display_name'].split(' (')[0]
+
+        if location_data['type'] == 'node':
+            node_id_to_set = location_data['id']
+            if node_id_to_set in self.node_positions:
+                position_to_set = self.node_positions[node_id_to_set]
+            else:
+                QMessageBox.warning(self, "Error", f"Node '{node_id_to_set}' not found in map data.")
+                return False
+        elif location_data['type'] == 'special_place':
+            sp_x, sp_y = location_data['pos']
+            node_id_to_set = self._find_simple_nearest_node(sp_x, sp_y)
+            if node_id_to_set and node_id_to_set in self.node_positions:
+                position_to_set = self.node_positions[node_id_to_set]
+                display_name_for_label = f"{location_data['name']} (near {node_id_to_set})"
+            else:
+                QMessageBox.warning(self, "Error", f"Could not find nearby node for special place '{location_data['name']}'.")
+                return False
+        else:
+            print(f"Unknown location type: {location_data['type']}")
+            return False
+
+        if node_id_to_set and position_to_set:
+            if node_id_to_set == self.start_node:
+                QMessageBox.warning(self, "Selection Error", "End cannot be the same as start location.")
+                self.sidebar.to_location_combo.setCurrentIndex(-1)
+                self.sidebar.to_location_combo.lineEdit().setText("")
+                return False
+
+            self.end_node = node_id_to_set
+            snapped_pos = QPointF(position_to_set[0], position_to_set[1])
+            self.sidebar.end_label.setText(f"End: {display_name_for_label}")
+            self.sidebar.clear_end_button.setEnabled(True)
+            self.map_viewer.set_permanent_point("end", snapped_pos)
+            print(f"End node set to {self.end_node}")
+            return True
+        return False
+
+    def _find_simple_nearest_node(self, x, y):
+        """Simple nearest node finder for search results (no virtual nodes)"""
+        if not self.node_positions:
+            return None
+        
         min_dist_sq = float('inf')
         nearest_node = None
+        
         for node_id, pos in self.node_positions.items():
+            # Skip virtual nodes
+            if node_id.startswith('VIRTUAL_'):
+                continue
             dist_sq = (pos[0] - x)**2 + (pos[1] - y)**2
             if dist_sq < min_dist_sq:
                 min_dist_sq = dist_sq
                 nearest_node = node_id
-        # Add a threshold check if needed (e.g., don't snap if click is too far)
-        # threshold_sq = 50**2 # Example: 50 pixels squared
-        # if min_dist_sq > threshold_sq:
-        #     return None
+        
         return nearest_node
 
+    def _find_nearest_node_or_edge(self, x, y):
+        """
+        Find nearest node OR position on edge.
+        Returns: (node_id, pos, is_virtual, edge_info)
+        - If close to existing node: (node_id, pos, False, None)
+        - If on edge: (virtual_id, pos, True, (u, v, ratio))
+        """
+        if not self.node_positions:
+            return None, None, False, None
+        
+        click_point = QPointF(x, y)
+        min_node_dist_sq = float('inf')
+        nearest_node = None
+        nearest_node_pos = None
+        
+        # First, find nearest node by direct distance
+        for node_id, pos in self.node_positions.items():
+            dist_sq = (pos[0] - x)**2 + (pos[1] - y)**2
+            if dist_sq < min_node_dist_sq:
+                min_node_dist_sq = dist_sq
+                nearest_node = node_id
+                nearest_node_pos = pos
+        
+        # If we're very close to a node (within 15 pixels), return it directly
+        if min_node_dist_sq < 225:  # 15^2
+            return nearest_node, nearest_node_pos, False, None
+        
+        # Check if we're close to any edge
+        if self.pathfinder:
+            best_edge_dist = float('inf')
+            best_edge = None
+            best_point_on_edge = None
+            best_ratio = 0.0
+            
+            for u, v in self.pathfinder.graph.edges():
+                try:
+                    pos_u = self.node_positions[u]
+                    pos_v = self.node_positions[v]
+                    point_u = QPointF(pos_u[0], pos_u[1])
+                    point_v = QPointF(pos_v[0], pos_v[1])
+                    
+                    # Calculate closest point on edge and distance
+                    edge_vec_x = point_v.x() - point_u.x()
+                    edge_vec_y = point_v.y() - point_u.y()
+                    click_vec_x = click_point.x() - point_u.x()
+                    click_vec_y = click_point.y() - point_u.y()
+                    
+                    edge_len_sq = edge_vec_x * edge_vec_x + edge_vec_y * edge_vec_y
+                    
+                    if edge_len_sq < 1e-9:
+                        continue
+                    
+                    # Project click onto edge
+                    t = (click_vec_x * edge_vec_x + click_vec_y * edge_vec_y) / edge_len_sq
+                    t = max(0.0, min(1.0, t))  # Clamp to edge
+                    
+                    # Point on edge
+                    point_on_edge = QPointF(
+                        point_u.x() + t * edge_vec_x,
+                        point_u.y() + t * edge_vec_y
+                    )
+                    
+                    # Distance from click to edge
+                    dist = QLineF(click_point, point_on_edge).length()
+                    
+                    if dist < best_edge_dist and dist < 25:  # Within 25 pixels
+                        best_edge_dist = dist
+                        best_edge = (u, v)
+                        best_point_on_edge = (point_on_edge.x(), point_on_edge.y())
+                        best_ratio = t
+                        
+                except KeyError:
+                    continue
+            
+            # If we found a close edge, return virtual node info
+            if best_edge and best_ratio > 0.05 and best_ratio < 0.95:
+                # Not too close to endpoints (at least 5% along the edge)
+                u, v = best_edge
+                virtual_id = f"VIRTUAL_{u}_{v}_{best_ratio:.3f}"
+                print(f"Virtual node on edge {u}-{v} at ratio {best_ratio:.2f}")
+                return virtual_id, best_point_on_edge, True, (u, v, best_ratio)
+        
+        # Fallback to nearest node
+        return nearest_node, nearest_node_pos, False, None
+
     def _handle_point_selected(self, point_type, x, y):
-        """Handles clicks on the map for selecting start/end points."""
-        # Store previous start/end to see if they changed for combo box updates
-        prev_start_node = self.start_node
-        prev_end_node = self.end_node
-
-        if x == -1 and y == -1: # Special case indicating a point was cleared in MapViewer
-             # This typically means a point was cleared programmatically or by specific action
-             # not covered by clicking on the marker itself (which is handled below)
-             if self.start_node is None and prev_start_node is not None: # Start point became None
-                 self._update_combo_text_for_map_selection("start", None)
-             if self.end_node is None and prev_end_node is not None: # End point became None
-                 self._update_combo_text_for_map_selection("end", None)
-             # Path clearing is handled by the caller or subsequent logic
-             return
-
-
-        nearest_node = self._find_nearest_node(x, y)
-        if nearest_node is None:
-            print("No nearby node found.")
-            self.map_viewer.clear_temporary_point() # Clear visual feedback if no node
+        """Handle clicks on map for selecting start/end/waypoint points."""
+        if x == -1 and y == -1:
             return
 
-        node_pos = self.node_positions[nearest_node]
-        snapped_pos = QPointF(node_pos[0], node_pos[1])
+        node_id, pos, is_virtual, edge_info = self._find_nearest_node_or_edge(x, y)
+        
+        if node_id is None:
+            print("No nearby node or edge found.")
+            self.map_viewer.clear_temporary_point()
+            return
 
-        # Decide whether to set start or end point
-        if self.start_node is None or self.start_node == nearest_node:
-            # Set or reset start point
-            if self.start_node == nearest_node: # Clicked on existing start node
-                 self.start_node = None
-                 # self.sidebar.start_label.setText("Start: Not Selected") # Updated by _update_combo_text
-                 self.map_viewer.clear_permanent_point("start")
-                 print(f"Start node {nearest_node} deselected.")
-            elif nearest_node == self.end_node: # Clicked on end node while start is empty
-                 print("Cannot set start node to the same as end node.")
-                 self.map_viewer.clear_temporary_point()
-                 return
-            else:
-                 self.start_node = nearest_node
-                 # self.sidebar.start_label.setText(f"Start: Node {nearest_node}") # Updated by _update_combo_text
-                 self.map_viewer.set_permanent_point("start", snapped_pos)
-                 print(f"Start node set to {nearest_node} at ({snapped_pos.x():.1f}, {snapped_pos.y():.1f})")
+        snapped_pos = QPointF(pos[0], pos[1])
+        
+        # Store virtual node info if needed
+        if is_virtual:
+            u, v, ratio = edge_info
+            # Store virtual node position
+            self.node_positions[node_id] = pos
+            # Add temporary edges to graph for pathfinding
+            self._add_virtual_node_to_graph(node_id, u, v, ratio)
+            print(f"Created virtual node {node_id} on edge {u}-{v}")
 
-        elif self.end_node is None or self.end_node == nearest_node:
-             # Set or reset end point
-             if self.end_node == nearest_node: # Clicked on existing end node
-                 self.end_node = None
-                 # self.sidebar.end_label.setText("End: Not Selected") # Updated by _update_combo_text
-                 self.map_viewer.clear_permanent_point("end")
-                 print(f"End node {nearest_node} deselected.")
-             else: # Cannot set end node to the same as start node (already checked by start_node == nearest_node above)
-                 self.end_node = nearest_node
-                 # self.sidebar.end_label.setText(f"End: Node {nearest_node}") # Updated by _update_combo_text
-                 self.map_viewer.set_permanent_point("end", snapped_pos)
-                 print(f"End node set to {nearest_node} at ({snapped_pos.x():.1f}, {snapped_pos.y():.1f})")
-        else:
-            # Both start and end are set, maybe allow changing start? Or require clearing first?
-            # Current logic: If both set, clicking selects a new start node.
-             if nearest_node == self.end_node:
-                 print("Cannot set start node to the same as end node.")
-                 self.map_viewer.clear_temporary_point()
-                 return
-             else: # Set new start node
-                 self.start_node = nearest_node
-                 # self.sidebar.start_label.setText(f"Start: Node {nearest_node}") # Updated by _update_combo_text
-                 self.map_viewer.set_permanent_point("start", snapped_pos)
-                 print(f"Start node changed to {nearest_node} at ({snapped_pos.x():.1f}, {snapped_pos.y():.1f})")
+        # Handle based on explicit mode
+        if point_type == "start":
+            if node_id == self.end_node:
+                QMessageBox.warning(self, "Selection Error", "Start cannot be the same as end point.")
+                self.map_viewer.clear_temporary_point()
+                return
+            
+            self.start_node = node_id
+            display_name = f"{node_id[:20]}..." if is_virtual else node_id
+            self.sidebar.start_label.setText(f"Start: {display_name}")
+            self.sidebar.clear_start_button.setEnabled(True)
+            self.map_viewer.set_permanent_point("start", snapped_pos)
+            self.sidebar.from_location_combo.lineEdit().setText(f"{display_name} (Map)")
+            self.sidebar.from_location_combo.setCurrentIndex(-1)
+            print(f"Start node set to {node_id}")
+            
+            # Auto-switch to end mode
+            self.sidebar.set_start_mode_button.setChecked(False)
+            if not self.end_node:
+                self.sidebar.set_end_mode_button.setChecked(True)
+        
+        elif point_type == "end":
+            if node_id == self.start_node:
+                QMessageBox.warning(self, "Selection Error", "End cannot be the same as start point.")
+                self.map_viewer.clear_temporary_point()
+                return
+            
+            self.end_node = node_id
+            display_name = f"{node_id[:20]}..." if is_virtual else node_id
+            self.sidebar.end_label.setText(f"End: {display_name}")
+            self.sidebar.clear_end_button.setEnabled(True)
+            self.map_viewer.set_permanent_point("end", snapped_pos)
+            self.sidebar.to_location_combo.lineEdit().setText(f"{display_name} (Map)")
+            self.sidebar.to_location_combo.setCurrentIndex(-1)
+            print(f"End node set to {node_id}")
+            
+            # Deactivate selection mode
+            self.sidebar.set_end_mode_button.setChecked(False)
+        
+        elif point_type == "waypoint":
+            # Add waypoint
+            waypoint_number = len(self.sidebar.waypoints) + 1
+            display_name = f"Stop {waypoint_number}: {node_id[:15] if is_virtual else node_id}"
+            
+            print(f"DEBUG: Adding waypoint - node_id={node_id}, is_virtual={is_virtual}")
+            
+            # Add to sidebar list
+            self.sidebar.add_waypoint_to_list(node_id, display_name, pos)
+            
+            # Add visual marker
+            marker = self.map_viewer.add_waypoint_marker(snapped_pos, waypoint_number)
+            print(f"DEBUG: Added waypoint marker, total markers: {len(self.map_viewer.waypoint_markers)}")
+            
+            print(f"Added waypoint {waypoint_number}: {node_id}")
 
-        # Update combo box text and labels if nodes changed
-        if self.start_node != prev_start_node:
-            self._update_combo_text_for_map_selection("start", self.start_node)
-        if self.end_node != prev_end_node:
-            self._update_combo_text_for_map_selection("end", self.end_node)
-
-        # Clear the temporary click marker now that we've handled the selection
         self.map_viewer.clear_temporary_point()
 
-        # Trigger pathfinding if both points are now selected
-        if self.start_node is not None and self.end_node is not None:
-            self._trigger_pathfinding()
+        # Trigger pathfinding if start and end are set
+        if self.start_node and self.end_node:
+            self._trigger_pathfinding_with_waypoints()
         else:
-            self.map_viewer.clear_path() # Clear path if one point was deselected
+            self.map_viewer.clear_path()
 
+    def _add_virtual_node_to_graph(self, virtual_id, u, v, ratio):
+        """Add a virtual node to the graph at position ratio along edge u-v"""
+        if virtual_id in self.pathfinder.graph:
+            return  # Already added
+        
+        # Get original edge weight
+        if not self.pathfinder.graph.has_edge(u, v):
+            print(f"Warning: Edge {u}-{v} doesn't exist for virtual node")
+            return
+        
+        original_weight = self.pathfinder.graph[u][v].get('weight', 1.0)
+        
+        # Add virtual node
+        pos = self.node_positions[virtual_id]
+        self.pathfinder.graph.add_node(virtual_id, pos=pos)
+        
+        # Split the edge: u -> virtual -> v
+        weight_u_to_virtual = original_weight * ratio
+        weight_virtual_to_v = original_weight * (1 - ratio)
+        
+        # Add edges (bidirectional)
+        self.pathfinder.graph.add_edge(u, virtual_id, weight=weight_u_to_virtual)
+        self.pathfinder.graph.add_edge(virtual_id, u, weight=weight_u_to_virtual)
+        self.pathfinder.graph.add_edge(virtual_id, v, weight=weight_virtual_to_v)
+        self.pathfinder.graph.add_edge(v, virtual_id, weight=weight_virtual_to_v)
+        
+        print(f"Added virtual edges: {u}->{virtual_id}({weight_u_to_virtual:.2f}), {virtual_id}->{v}({weight_virtual_to_v:.2f})")
+
+    def _trigger_pathfinding_with_waypoints(self):
+        """Calculate path including waypoints with optional TSP optimization"""
+        if not self.start_node or not self.end_node:
+            return
+        
+        if not self.pathfinder:
+            QMessageBox.critical(self, "Error", "Pathfinding engine not available.")
+            return
+        
+        # Check if route optimization is enabled
+        if self.sidebar.optimize_route_checkbox.isChecked() and len(self.sidebar.waypoints) > 1:
+            print("🔄 TSP Route Optimization ENABLED")
+            
+            # Solve TSP to get optimal waypoint order
+            optimal_order = self._solve_tsp_route(
+                self.start_node, 
+                self.end_node, 
+                self.sidebar.waypoints
+            )
+            
+            # Reorder waypoints based on TSP solution
+            optimized_waypoints = [self.sidebar.waypoints[i] for i in optimal_order]
+            
+            print(f"Original order: {[wp['node_id'][:15] + '...' if len(wp['node_id']) > 15 else wp['node_id'] for wp in self.sidebar.waypoints]}")
+            print(f"Optimized order: {[wp['node_id'][:15] + '...' if len(wp['node_id']) > 15 else wp['node_id'] for wp in optimized_waypoints]}")
+            
+            # Update sidebar to show optimized order
+            self.sidebar.waypoints = optimized_waypoints
+            self.sidebar.waypoints_list.clear()
+            for i, wp in enumerate(optimized_waypoints):
+                item_text = f"{i + 1}. {wp['name']}"
+                self.sidebar.waypoints_list.addItem(item_text)
+            
+            # Redraw markers with new order
+            self.map_viewer.clear_waypoint_markers()
+            for i, wp in enumerate(optimized_waypoints):
+                pos = QPointF(wp['pos'][0], wp['pos'][1])
+                self.map_viewer.add_waypoint_marker(pos, i + 1)
+            
+            waypoints = optimized_waypoints
+        else:
+            # Restore original order if optimization was previously enabled
+            if len(self.sidebar.waypoints) > 0 and len(self.sidebar.original_waypoint_order) > 0:
+                # Check if current order differs from original (means it was optimized)
+                current_ids = [wp['node_id'] for wp in self.sidebar.waypoints]
+                original_ids = [wp['node_id'] for wp in self.sidebar.original_waypoint_order]
+                
+                if current_ids != original_ids:
+                    print("↩️  Restoring original waypoint order")
+                    
+                    # Restore original order
+                    self.sidebar.waypoints = [wp.copy() for wp in self.sidebar.original_waypoint_order]
+                    
+                    # Update UI
+                    self.sidebar.waypoints_list.clear()
+                    for i, wp in enumerate(self.sidebar.waypoints):
+                        item_text = f"{i + 1}. {wp['name']}"
+                        self.sidebar.waypoints_list.addItem(item_text)
+                    
+                    # Redraw markers with original order
+                    self.map_viewer.clear_waypoint_markers()
+                    for i, wp in enumerate(self.sidebar.waypoints):
+                        pos = QPointF(wp['pos'][0], wp['pos'][1])
+                        self.map_viewer.add_waypoint_marker(pos, i + 1)
+            
+            print("Following user-defined waypoint order")
+            waypoints = self.sidebar.waypoints
+        
+        # Build route: start → waypoint1 → waypoint2 → ... → end
+        route_points = [self.start_node]
+        route_points.extend([wp['node_id'] for wp in waypoints])
+        route_points.append(self.end_node)
+        
+        print(f"Finding multi-stop route: {' → '.join([p[:15] + '...' if len(p) > 15 else p for p in route_points])}")
+        
+        try:
+            full_path = []
+            total_cost = 0.0
+            
+            # Calculate path for each segment
+            for i in range(len(route_points) - 1):
+                segment_start = route_points[i]
+                segment_end = route_points[i + 1]
+                
+                # Check if both nodes are directly connected (on same edge)
+                if self.pathfinder.graph.has_edge(segment_start, segment_end):
+                    # Direct connection exists
+                    segment_path = [segment_start, segment_end]
+                    segment_cost = self.pathfinder.graph[segment_start][segment_end].get('weight', 0)
+                    print(f"Direct edge: {segment_start[:15]}... → {segment_end[:15]}...")
+                else:
+                    # Need to find path
+                    segment_path = self.pathfinder.find_path(segment_start, segment_end)
+                    
+                    if not segment_path:
+                        QMessageBox.warning(self, "No Path", 
+                            f"No path found between stop {i} and stop {i+1}")
+                        self.map_viewer.clear_path()
+                        return
+                    
+                    # Calculate segment cost
+                    segment_cost = 0.0
+                    has_infinite = False
+                    for j in range(len(segment_path) - 1):
+                        u, v = segment_path[j], segment_path[j+1]
+                        if self.pathfinder.graph.has_edge(u, v):
+                            weight = self.pathfinder.graph[u][v].get('weight', 0)
+                            if weight == float('inf'):
+                                has_infinite = True
+                                break
+                            segment_cost += weight
+                    
+                    if has_infinite:
+                        QMessageBox.warning(self, "Blocked Path",
+                            f"Path blocked between stop {i} and stop {i+1}")
+                        self.map_viewer.clear_path()
+                        return
+                
+                total_cost += segment_cost
+                
+                # Add to full path (avoid duplicates at connection points)
+                if i == 0:
+                    full_path.extend(segment_path)
+                else:
+                    full_path.extend(segment_path[1:])  # Skip first node (duplicate)
+            
+            print(f"✓ Multi-stop path found: {len(full_path)} nodes, total cost: {total_cost:.2f}")
+            self.map_viewer.draw_path(full_path, self.node_positions)
+            
+        except Exception as e:
+            print(f"Error during multi-stop pathfinding: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Pathfinding Error", f"An error occurred: {e}")
+            self.map_viewer.clear_path()
+
+    def _optimize_route_order(self, route_points):
+        """
+        Optimize route by checking if waypoints are already on the direct path.
+        If waypoint W is on the path from A to B, and we're going A→W→B,
+        check if W is actually between A and B or if we need to backtrack.
+        """
+        if len(route_points) <= 2:
+            return route_points
+        
+        optimized = [route_points[0]]
+        
+        for i in range(1, len(route_points) - 1):
+            prev = route_points[i - 1]
+            curr = route_points[i]
+            next_point = route_points[i + 1]
+            
+            # Check if curr is on the direct path from prev to next
+            try:
+                direct_path = self.pathfinder.find_path(prev, next_point)
+                if direct_path and curr in direct_path:
+                    # curr is already on the path from prev to next
+                    # Check if adding it explicitly causes backtracking
+                    path_with_waypoint_1 = self.pathfinder.find_path(prev, curr)
+                    path_with_waypoint_2 = self.pathfinder.find_path(curr, next_point)
+                    
+                    if path_with_waypoint_1 and path_with_waypoint_2:
+                        total_nodes_with = len(path_with_waypoint_1) + len(path_with_waypoint_2) - 1
+                        total_nodes_direct = len(direct_path)
+                        
+                        # If going through waypoint doesn't add many extra nodes, keep it
+                        if total_nodes_with <= total_nodes_direct * 1.2:  # Allow 20% overhead
+                            optimized.append(curr)
+                            continue
+                    
+                    # Otherwise skip this waypoint as it causes backtracking
+                    print(f"Skipping waypoint {curr} - would cause backtracking")
+                    continue
+            except:
+                pass
+            
+            # Keep this waypoint
+            optimized.append(curr)
+        
+        optimized.append(route_points[-1])
+        
+        if len(optimized) < len(route_points):
+            print(f"Route optimized: {len(route_points)} → {len(optimized)} stops")
+        
+        return optimized
+    
+    def _solve_tsp_route(self, start, end, waypoints):
+        """
+        Solve TSP to find optimal order to visit waypoints.
+        Returns optimized list of waypoint indices.
+        Uses nearest neighbor heuristic for reasonable performance.
+        """
+        if not waypoints:
+            return []
+        
+        # Build distance matrix
+        all_points = [start] + [wp['node_id'] for wp in waypoints] + [end]
+        n = len(all_points)
+        
+        # Calculate all pairwise distances using A* path costs
+        print(f"Calculating distance matrix for {n} points...")
+        dist_matrix = {}
+        
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    dist_matrix[(i, j)] = 0
+                    continue
+                
+                # Try to use cached distance or calculate
+                key = (all_points[i], all_points[j])
+                
+                # Check direct edge first
+                if self.pathfinder.graph.has_edge(all_points[i], all_points[j]):
+                    dist_matrix[(i, j)] = self.pathfinder.graph[all_points[i]][all_points[j]].get('weight', float('inf'))
+                else:
+                    # Calculate path
+                    path = self.pathfinder.find_path(all_points[i], all_points[j])
+                    if path:
+                        cost = 0.0
+                        for k in range(len(path) - 1):
+                            u, v = path[k], path[k + 1]
+                            if self.pathfinder.graph.has_edge(u, v):
+                                weight = self.pathfinder.graph[u][v].get('weight', 0)
+                                if weight == float('inf'):
+                                    cost = float('inf')
+                                    break
+                                cost += weight
+                        dist_matrix[(i, j)] = cost
+                    else:
+                        dist_matrix[(i, j)] = float('inf')
+        
+        # Solve TSP using nearest neighbor heuristic
+        # Start must be first (index 0), end must be last (index n-1)
+        # We need to find optimal order for waypoints (indices 1 to n-2)
+        
+        waypoint_indices = list(range(1, n - 1))  # Indices of waypoints only
+        
+        if len(waypoint_indices) <= 1:
+            return waypoint_indices  # No optimization needed
+        
+        # For small number of waypoints, try all permutations (brute force)
+        if len(waypoint_indices) <= 7:  # 7! = 5040 permutations (manageable)
+            print(f"Using brute force TSP for {len(waypoint_indices)} waypoints...")
+            from itertools import permutations
+            
+            best_order = None
+            best_cost = float('inf')
+            
+            for perm in permutations(waypoint_indices):
+                # Calculate total cost: start -> perm[0] -> perm[1] -> ... -> perm[-1] -> end
+                route = [0] + list(perm) + [n - 1]
+                cost = sum(dist_matrix[(route[i], route[i + 1])] for i in range(len(route) - 1))
+                
+                if cost < best_cost:
+                    best_cost = cost
+                    best_order = list(perm)
+            
+            print(f"Brute force TSP found route with cost: {best_cost:.2f}")
+            # Convert back to 0-indexed for waypoints array
+            return [idx - 1 for idx in best_order]
+        
+        else:
+            # For larger number, use nearest neighbor heuristic
+            print(f"Using nearest neighbor heuristic for {len(waypoint_indices)} waypoints...")
+            
+            unvisited = set(waypoint_indices)
+            current = 0  # Start from start point
+            route = []
+            
+            while unvisited:
+                # Find nearest unvisited waypoint
+                nearest = min(unvisited, key=lambda x: dist_matrix[(current, x)])
+                route.append(nearest)
+                unvisited.remove(nearest)
+                current = nearest
+            
+            total_cost = sum(dist_matrix[(route[i] if i > 0 else 0, route[i + 1] if i + 1 < len(route) else n - 1)] 
+                            for i in range(-1, len(route)))
+            print(f"Nearest neighbor TSP found route with cost: {total_cost:.2f}")
+            
+            # Convert back to 0-indexed for waypoints array
+            return [idx - 1 for idx in route]
 
     def _trigger_pathfinding(self):
-        """Initiates pathfinding between the selected start and end nodes."""
+        """Initiate pathfinding between selected points (with or without waypoints)."""
+        # If waypoints exist, use multi-stop routing
+        if self.sidebar.waypoints:
+            self._trigger_pathfinding_with_waypoints()
+            return
+        
+        # Otherwise, simple start-to-end routing
         if self.start_node is None or self.end_node is None:
-            QMessageBox.warning(self, "Pathfinding", "Please select both start and end points.")
             self.map_viewer.clear_path()
             return
 
@@ -895,38 +1271,43 @@ class MainWindow(QMainWindow):
             return
 
         print(f"Finding path from {self.start_node} to {self.end_node}...")
-        print(f"DEBUG: MainWindow: In _trigger_pathfinding from {self.start_node} to {self.end_node}.") # DEBUG
+        
         try:
-            # path_nodes, total_cost = self.pathfinder.find_path(self.start_node, self.end_node) # Old problematic line
-            path_nodes = self.pathfinder.find_path(self.start_node, self.end_node) # Corrected line
+            path_nodes = self.pathfinder.find_path(self.start_node, self.end_node)
 
             if path_nodes:
-                # The 'total_cost' variable from the unpacking is no longer available here.
-                # The cost is calculated below.
-                # print(f"DEBUG: MainWindow: Path found: {path_nodes}, Cost: {total_cost}. Drawing path.") # DEBUG # Old debug print
+                # Calculate path cost
+                cost = 0.0
+                path_has_infinite_weight = False
                 
-                # Calculate path cost if path is found
-                cost = 0.0 # Initialize cost as float
-                if self.pathfinder.graph and len(path_nodes) > 1: # path_nodes is already confirmed to be truthy
+                if self.pathfinder.graph and len(path_nodes) > 1:
                     for i in range(len(path_nodes) - 1):
                         u, v = path_nodes[i], path_nodes[i+1]
                         if self.pathfinder.graph.has_edge(u, v):
-                            cost += self.pathfinder.graph[u][v].get('weight', 0)
+                            edge_weight = self.pathfinder.graph[u][v].get('weight', 0)
+                            if edge_weight == float('inf'):
+                                path_has_infinite_weight = True
+                                break
+                            cost += edge_weight
                         else:
-                            # This case should ideally not happen if path is valid
-                            print(f"Warning: Edge {u}-{v} not found in graph while calculating cost.")
-                            cost = float('inf') # Indicate an issue with the path or graph
+                            cost = float('inf')
+                            path_has_infinite_weight = True
                             break
-                # If path_nodes has 0 or 1 node (e.g. start=end), cost remains 0.0, which is correct.
                 
-                print(f"DEBUG: MainWindow: Path found: {path_nodes}, Calculated Cost: {cost:.2f}. Drawing path.") # Updated debug print using calculated cost
-                
-                print(f"Path found: {path_nodes} with cost {cost:.2f}")
-                self.map_viewer.draw_path(path_nodes, self.node_positions)
+                # Don't draw path if it contains blocked edges
+                if path_has_infinite_weight or cost == float('inf'):
+                    print(f"Path contains blocked edges (cost: {cost}). Not displaying.")
+                    QMessageBox.warning(self, "No Valid Path", 
+                        f"The path between {self.start_node} and {self.end_node} is blocked.\n\n"
+                        f"All available routes contain blocked roads.")
+                    self.map_viewer.clear_path()
+                else:
+                    print(f"Path found: {len(path_nodes)} nodes, cost: {cost:.2f}")
+                    self.map_viewer.draw_path(path_nodes, self.node_positions)
             else:
-                print("DEBUG: MainWindow: Path not found by pathfinder in _trigger_pathfinding.") # DEBUG
                 print("No path found.")
-                QMessageBox.information(self, "Pathfinding", f"No path found between node {self.start_node} and {self.end_node}.")
+                QMessageBox.information(self, "Pathfinding", 
+                    f"No path found between {self.start_node} and {self.end_node}.")
                 self.map_viewer.clear_path()
         except Exception as e:
             print(f"Error during pathfinding: {e}")
@@ -934,16 +1315,14 @@ class MainWindow(QMainWindow):
             self.map_viewer.clear_path()
 
     def closeEvent(self, event):
-        """Ensure timers are stopped when the window closes."""
-        print("Main window closing, stopping timers...")
+        """Ensure timers are stopped when window closes."""
+        print("Closing application, stopping timers...")
         self.stop_all_traffic_light_timers()
         super().closeEvent(event)
 
 
 if __name__ == "__main__":
-    # Make sure QApplication is created before MainWindow
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
-
